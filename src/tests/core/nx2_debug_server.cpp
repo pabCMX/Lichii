@@ -166,6 +166,40 @@ TEST_CASE("Debug frame times measure intervals and retain the ring tail", "[core
     REQUIRE(pending["max_ms"] == 1.0);
 }
 
+TEST_CASE("Measured input excludes boundary frames and rejects incomplete coverage", "[core][nx2_debug_server]") {
+    auto& ring = Core::g_nx2_present_times_ns;
+    const auto old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        Core::g_nx2_present_count = old_count;
+        for (auto& timestamp : ring) {
+            timestamp = 0;
+        }
+    };
+    ring[9] = 1;
+    ring[10] = 100'000'000;
+    ring[11] = 116'123'456;
+    ring[12] = 900'000'000;
+    Core::g_nx2_present_count = 12;
+    const auto read = [](u64 total) {
+        return Core::Nx2Debug::ReadInputFrameTimes(10, total, 90'000'000, 1'000'000'000);
+    };
+    REQUIRE(read(1)["complete"] == true);
+    REQUIRE(read(1)["frames"] == 0);
+    REQUIRE(read(2)["intervals_ms"] == json::array({16.123456}));
+    REQUIRE(read(2)["first_present"] == 10);
+    REQUIRE(read(2)["last_present"] == 11);
+    for (u64 invalid : {u64{0}, u64{1}, u64{1'000'000'001}}) {
+        ring[11] = invalid;
+        REQUIRE(read(2)["complete"] == false);
+        REQUIRE(read(2)["intervals_ms"].empty());
+    }
+    ring[11] = 116'123'456;
+    Core::g_nx2_present_count = 4106;
+    REQUIRE(read(2)["truncated"] == true);
+    REQUIRE_THROWS(read(0));
+    REQUIRE_THROWS(read(2049));
+}
+
 TEST_CASE("Debug server requests map to handlers", "[core][nx2_debug_server]") {
     const Handlers handlers = EchoHandlers();
     REQUIRE(json::parse(Core::Nx2Debug::HandleRequest(
@@ -463,6 +497,43 @@ TEST_CASE("Debug input steps follow the present count exactly", "[core][nx2_debu
     REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 12)->buttons == Core::HID::NpadButton::None);
     REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 13)->buttons == Core::HID::NpadButton::B);
     REQUIRE_FALSE(Core::Nx2Debug::InputAt(steps, 10, 14));
+}
+
+TEST_CASE("Debug input steps can follow host time instead of presents", "[core][nx2_debug_server]") {
+    const auto timed = Core::Nx2Debug::ParseInputStep(json{{"buttons", {"A"}}, {"ms", 250}});
+    REQUIRE(timed.ms == 250);
+    REQUIRE(timed.frames == 0);
+    for (const json& bad : {json{{"ms", 0}}, json{{"ms", 600001}}, json{{"ms", 1.5}},
+                            json{{"ms", 5}, {"frames", 5}}}) {
+        CAPTURE(bad.dump());
+        REQUIRE_THROWS_AS(Core::Nx2Debug::ParseInputStep(bad), std::exception);
+    }
+    std::vector<Core::Nx2Debug::InputStep> steps(2);
+    steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}}, .frames = 0,
+                .ms = 2};
+    steps[1] = {.input = {.buttons = Core::HID::NpadButton::B, .left = {}, .right = {}}, .frames = 0,
+                .ms = 1};
+    REQUIRE(Core::Nx2Debug::InputAtTime(steps, 0)->buttons == Core::HID::NpadButton::A);
+    REQUIRE(Core::Nx2Debug::InputAtTime(steps, 1999)->buttons == Core::HID::NpadButton::A);
+    REQUIRE(Core::Nx2Debug::InputAtTime(steps, 2000)->buttons == Core::HID::NpadButton::B);
+    REQUIRE_FALSE(Core::Nx2Debug::InputAtTime(steps, 3000));
+}
+
+TEST_CASE("Debug timed input steps bound ms and never count presents", "[core][nx2_debug_server]") {
+    REQUIRE(Core::Nx2Debug::ParseInputStep(json{{"ms", 600000}}).ms == 600000);
+    for (const json& bad : {json::object(), json{{"ms", -1}}, json{{"ms", "5"}},
+                            json{{"ms", std::numeric_limits<u64>::max()}},
+                            json{{"ms", 5}, {"frames", 0}}}) {
+        CAPTURE(bad.dump());
+        REQUIRE_THROWS_AS(Core::Nx2Debug::ParseInputStep(bad), std::exception);
+    }
+    std::vector<Core::Nx2Debug::InputStep> steps(1);
+    steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}}, .frames = 0,
+                .ms = 600000};
+    REQUIRE_FALSE(Core::Nx2Debug::InputAt(steps, 10, 10));
+    REQUIRE(Core::Nx2Debug::InputAtTime(steps, 599'999'999)->buttons == Core::HID::NpadButton::A);
+    REQUIRE_FALSE(Core::Nx2Debug::InputAtTime(steps, 600'000'000));
+    REQUIRE_FALSE(Core::Nx2Debug::InputAtTime({}, 0));
 }
 
 TEST_CASE("Injected input merges buttons and replaces sticks while installed", "[core][nx2_debug_server]") {

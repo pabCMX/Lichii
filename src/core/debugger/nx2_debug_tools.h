@@ -79,15 +79,21 @@ struct GuestSearch {
                                             u64 start, u64 end, size_t max_hits,
                                             std::chrono::steady_clock::time_point deadline);
 
-/// One step of input or input_sequence: what to hold, for how many presented frames.
+/// One step of input or input_sequence: what to hold, for how many presented frames, or for how
+/// many milliseconds of host time (ms != 0, frames == 0).
 struct InputStep {
     HID::InjectedInput input;
     u64 frames;
+    u64 ms{};
 };
 
-/// {buttons?, left_stick?, right_stick?, frames}. Sticks are [x, y] in -1..1. Throws
+/// {buttons?, left_stick?, right_stick?, frames | ms}. Sticks are [x, y] in -1..1. Throws
 /// std::runtime_error on unknown keys, buttons or out-of-range values.
 [[nodiscard]] InputStep ParseInputStep(const nlohmann::json& step);
+
+/// The input of the timed step active elapsed_us after the start; nothing from the end on.
+[[nodiscard]] std::optional<HID::InjectedInput> InputAtTime(std::span<const InputStep> steps,
+                                                           u64 elapsed_us);
 
 /// The input of the step active at present count now, for steps starting at present count start;
 /// nothing before start and from the end of the last step on.
@@ -110,6 +116,9 @@ struct Png {
 /// stop is set first, or when another screenshot request is pending.
 [[nodiscard]] Png CaptureScreenshot(System& system, u32 height, std::chrono::seconds timeout,
                                     const std::atomic<bool>& stop);
+
+/// Full precision intervals between held presents only; incomplete snapshots fail closed.
+[[nodiscard]] nlohmann::json ReadInputFrameTimes(u64 first, u64 total, u64 begin_ns, u64 end_ns);
 
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
 [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,

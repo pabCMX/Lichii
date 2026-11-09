@@ -319,9 +319,9 @@ How the reads are safe:
 
 ### Input (implemented)
 
-**`input`** `{buttons?, left_stick?, right_stick?, frames, timeout_s?}` holds the buttons and
+**`input`** `{buttons?, left_stick?, right_stick?, frames, timeout_s?, measure?}` holds the buttons and
 sticks for `frames` presented frames and then releases them. It returns when they are done.
-**`input_sequence`** `{steps: [{buttons?, left_stick?, right_stick?, frames}, ...], timeout_s?}`
+**`input_sequence`** `{steps: [{buttons?, left_stick?, right_stick?, frames}, ...], timeout_s?, measure?}`
 runs the steps back to back, at most 1000 steps and 36000 frames per call. A step with no
 buttons and no sticks injects nothing, so it works as a pause between moves.
 
@@ -347,15 +347,48 @@ Switch 2 advances it on vi2 present calls. Generated display frames do not count
 the next present. The injector looks up the active step from the present count at every read
 (`InputAt`), so a step changes at the first npad update after its present: the npad updates
 every 1 ms (`src/hid_core/resource_manager.cpp:48`). A slow frame stretches the step in time but
-not in frames, so the same sequence moves the camera the same way on every run.
+not in frames. Games that integrate movement over time can therefore follow different paths
+when replay frame times differ.
+
+Steps may give `ms` instead of `frames` (one unit per call, at most 600000 ms in total). Timed
+steps follow host `steady_clock` time from the moment the injector is installed, for games that
+advance by elapsed time: with present-counted steps such a game moves further when frames are
+slower (OOT moved Link visibly less in a run whose 90 held presents took 4.33 s instead of
+4.93 s). A timed result reports `clock: "host_time"`, `ms`, and as `frames` the presents that
+began inside the window except the last; `measure` then covers those presents (2 to 2048),
+otherwise the measurement is marked incomplete. Timed input still quantizes to the game's own
+input reads, so it narrows run-to-run drift but is not a frame-exact replay.
+Host time continues during pauses and hangs; completion of a timed call does not prove the
+game advanced. Reject incomplete measurements and failed scene checkpoints.
+For timed calls, `timeout_s` must exceed the requested duration. Measured timed calls return
+`head_ms`, `tail_ms`, and `window_ms` when their present snapshot is complete. The head and tail
+are the time before the first and after the last measured present; they are excluded from
+`intervals_ms` and its FPS/quantiles. `complete` describes the present snapshot, not full-window
+coverage. Include these edges when assessing stalls, and report interval coverage separately
+from elapsed-window throughput. A window with too few or too many presents returns incomplete
+measurement statistics, not evidence of smooth playback.
 
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
-(`SCOPE_EXIT`): when the steps are done; on timeout, when frames stop for `timeout_s` (default
-`frames / 20 + 10`, at most 900); when the game shuts down; and when the client disconnects. The
+(`SCOPE_EXIT`): when the steps are done; on timeout (default `frames / 20 + 10` or
+`ms / 1000 + 10` seconds, at most 900); when the game shuts down; and when the client disconnects. The
 transport gives every handler a `ClientGone` probe, a non-blocking peek at the request's socket
 (`nx2_debug_server.cpp`), which the wait polls every 2 ms. The adapter waits as long as the
 emulator's default timeout, so it does not drop a long sequence early.
+
+With `measure: true`, input calls are limited to 2048 presents and additionally return
+`measurement.supported: "held-input-v1"`. For `first_present = start` and `frames = total`,
+only timestamps `start..start+total-1` are used; the response waits for counter
+`>= start+total`. There are exactly `total-1` intervals (zero for one present).
+`intervals_ms` contains every interval at full precision, with statistics, inclusive
+`first_present`/`last_present`, `expected_intervals`, `covered_presents`, snapshot counter
+bounds, `complete` and `truncated`. Invalid/pending/overwritten timestamps produce incomplete
+coverage and an empty interval list; consumers must reject them. For frame-counted input, a
+present advancing while the injector is being installed rejects the measured call and releases input.
+The default nonmeasuring response is unchanged. Debug dispatch remains serial: no parallel
+`frame_times` request is needed. Screenshots taken after responses lie outside the measurement.
+Multiple chunks omit their cross-chunk intervals; pooled quantiles are not a continuous
+wall-time route measurement. These are host guest-present timestamps, not GPU execution times.
 
 Use it when the owner has put the controller down: injected buttons add to whatever the owner
 presses. For an A/B test, run the same `input_sequence` from the same spot under each variant
