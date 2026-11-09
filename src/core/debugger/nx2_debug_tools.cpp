@@ -786,12 +786,12 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error{fmt::format(
-                "{} of {} {} passed within {} s (paused or loading?); input released",
+                "{} of {} {} within {} s (paused or loading?); input released",
                 timed ? static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                              std::chrono::steady_clock::now() - begin)
                                              .count())
                       : (now >= start ? now - start : 0),
-                total, timed ? "ms" : "frames", timeout)};
+                total, timed ? "ms passed" : "frames were presented", timeout)};
         }
         std::this_thread::sleep_for(timed ? 1ms : 2ms);
     }
@@ -901,6 +901,12 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
 }
 
 } // Anonymous namespace
+
+json CallTool(System& system, std::string_view method, const json& params) {
+    const auto state = std::make_shared<ToolState>(system, "", 0, std::filesystem::path{});
+    const Handlers handlers = MakeHandlers(state);
+    return handlers.at(std::string{method})(params, [] { return false; });
+}
 
 u64 ParseShaderHash(std::string_view text) {
     const std::string_view digits =
