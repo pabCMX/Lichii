@@ -120,6 +120,11 @@ struct Png {
 /// Full precision intervals between held presents only; incomplete snapshots fail closed.
 [[nodiscard]] nlohmann::json ReadInputFrameTimes(u64 first, u64 total, u64 begin_ns, u64 end_ns);
 
+/// Runs one debug-server method on system as the service would, with a client that never leaves.
+/// For tests: the service itself dispatches through its own handlers.
+[[nodiscard]] nlohmann::json CallTool(System& system, std::string_view method,
+                                      const nlohmann::json& params);
+
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
 [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,
                                                          u64 program_id);

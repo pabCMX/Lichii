@@ -19,6 +19,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "hid_core/hid_core.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/nx2_debug_control.h"
 
@@ -534,6 +535,102 @@ TEST_CASE("Debug timed input steps bound ms and never count presents", "[core][n
     REQUIRE(Core::Nx2Debug::InputAtTime(steps, 599'999'999)->buttons == Core::HID::NpadButton::A);
     REQUIRE_FALSE(Core::Nx2Debug::InputAtTime(steps, 600'000'000));
     REQUIRE_FALSE(Core::Nx2Debug::InputAtTime({}, 0));
+}
+
+namespace {
+
+/// Stamps a present every 2 ms, like the GPU thread at 500 fps, until it is destroyed.
+class FakePresenter {
+public:
+    FakePresenter()
+        : thread{[this] {
+              while (!stop) {
+                  const u64 present = ++Core::g_nx2_present_count;
+                  Core::g_nx2_present_times_ns[present % Core::g_nx2_present_times_ns.size()] =
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+                  std::this_thread::sleep_for(2ms);
+              }
+          }} {}
+    ~FakePresenter() {
+        stop = true;
+        thread.join();
+    }
+
+private:
+    std::atomic<bool> stop{};
+    std::thread thread;
+};
+
+} // Anonymous namespace
+
+TEST_CASE("Debug input answers as before unless the client asks for ms or measure",
+          "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    REQUIRE(controller.IsConnected());
+    const auto old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        Core::g_nx2_present_count = old_count;
+        for (auto& timestamp : Core::g_nx2_present_times_ns) {
+            timestamp = 0;
+        }
+    };
+    const auto call = [&](std::string_view method, const json& params) {
+        FakePresenter presenter;
+        // A measured frame-counted call refuses when a present lands while it installs its
+        // injector. That is its designed check, so try again a few times.
+        for (int attempt = 1;; ++attempt) {
+            try {
+                return Core::Nx2Debug::CallTool(system, method, params);
+            } catch (const std::runtime_error& error) {
+                if (attempt == 5 || !std::string_view{error.what()}.starts_with("present advanced")) {
+                    throw;
+                }
+            }
+        }
+    };
+    const auto keys = [](const json& result) {
+        std::vector<std::string> names;
+        for (const auto& [key, value] : result.items()) {
+            names.push_back(key);
+        }
+        return names;
+    };
+    // The response origin gives: no measurement, clock or ms, and frames as requested.
+    const std::vector<std::string> plain_keys{"controller", "elapsed_s", "first_present", "frames",
+                                              "steps"};
+    const json plain = call("input", {{"buttons", {"A"}}, {"frames", 3}});
+    REQUIRE(keys(plain) == plain_keys);
+    REQUIRE(plain["frames"] == 3);
+    REQUIRE(plain["controller"] == "player1");
+    const json sequence = call(
+        "input_sequence", {{"steps", {{{"buttons", {"A"}}, {"frames", 2}}, {{"frames", 1}}}}});
+    REQUIRE(keys(sequence) == plain_keys);
+    REQUIRE(sequence["frames"] == 3);
+    REQUIRE(sequence["steps"] == 2);
+    REQUIRE(controller.GetNpadButtons().raw == Core::HID::NpadButton::None);
+
+    const json measured = call("input", {{"buttons", {"A"}}, {"frames", 3}, {"measure", true}});
+    REQUIRE(measured["frames"] == 3);
+    REQUIRE(measured["measurement"]["supported"] == "held-input-v1");
+    REQUIRE(measured["measurement"]["complete"] == true);
+    REQUIRE(measured["measurement"]["intervals_ms"].size() == 2);
+    REQUIRE_FALSE(measured.contains("clock"));
+
+    const json timed = call("input_sequence", {{"steps", {{{"buttons", {"A"}}, {"ms", 100}}}},
+                                               {"measure", true}});
+    REQUIRE(timed["clock"] == "host_time");
+    REQUIRE(timed["ms"] == 100);
+    REQUIRE(timed["measurement"]["complete"] == true);
+    REQUIRE(timed["measurement"]["window_ms"] == 100);
+    REQUIRE(timed["frames"].get<u64>() >= 2);
+    REQUIRE(controller.GetNpadButtons().raw == Core::HID::NpadButton::None);
+    REQUIRE_THROWS(call("input_sequence", {{"steps", {{{"frames", 1}}, {{"ms", 1}}}}}));
 }
 
 TEST_CASE("Injected input merges buttons and replaces sticks while installed", "[core][nx2_debug_server]") {
