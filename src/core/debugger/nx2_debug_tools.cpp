@@ -48,6 +48,7 @@ constexpr size_t RING_LINES = 20000;
 constexpr u64 MAX_READ = 64 * 1024;
 /// Presented frames one input or input_sequence call holds at most (10 minutes at 60 fps).
 constexpr u64 MAX_INPUT_FRAMES = 36000;
+constexpr u64 MAX_INPUT_MS = 600'000;
 constexpr size_t MAX_INPUT_STEPS = 1000;
 
 constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
@@ -237,35 +238,12 @@ json FrameTimes(ToolState& state, const json& params) {
 
 } // Anonymous namespace
 
-json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refresh_hz,
-                    size_t recent_limit) {
-    const u64 capacity = g_nx2_present_times_ns.size();
-    bool truncated = after < before || after - before > capacity;
-    const u64 first = (std::max)(before + 1, after > capacity ? after - capacity + 1 : u64{1});
-    std::vector<double> intervals;
-    u64 previous = 0;
-    for (u64 frame = after; frame >= first; --frame) {
-        const u64 timestamp =
-            g_nx2_present_times_ns[frame % capacity].load(std::memory_order_relaxed);
-        // The counter advances before its store; the slot can also be overwritten during a read.
-        if (timestamp < begin_ns || timestamp > end_ns) {
-            truncated |= timestamp > end_ns;
-            previous = 0;
-            continue;
-        }
-        if (previous != 0 && timestamp > previous) {
-            intervals.clear();
-        } else if (previous != 0) {
-            intervals.push_back(static_cast<double>(previous - timestamp) / 1'000'000.0);
-        }
-        previous = timestamp;
-    }
-
-    std::ranges::reverse(intervals);
+static json IntervalStats(std::vector<double> intervals, double refresh_hz, bool truncated,
+                          bool full_precision, size_t recent_limit = 120) {
     json recent = json::array();
-    for (size_t i = intervals.size() > recent_limit ? intervals.size() - recent_limit : 0;
+    for (size_t i = !full_precision && intervals.size() > recent_limit ? intervals.size() - recent_limit : 0;
          i < intervals.size(); ++i) {
-        recent.push_back(std::round(intervals[i] * 10.0) / 10.0);
+        recent.push_back(full_precision ? intervals[i] : std::round(intervals[i] * 10.0) / 10.0);
     }
     std::ranges::sort(intervals);
     const size_t frames = intervals.size();
@@ -308,6 +286,70 @@ json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refr
                                                             (std::min<size_t>)(frames, 10))))},
             {"intervals_ms", std::move(recent)},
             {"truncated", truncated}};
+}
+
+json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refresh_hz,
+                    size_t recent_limit) {
+    const u64 capacity = g_nx2_present_times_ns.size();
+    bool truncated = after < before || after - before > capacity;
+    const u64 first = (std::max)(before + 1, after > capacity ? after - capacity + 1 : u64{1});
+    std::vector<double> intervals;
+    u64 previous = 0;
+    for (u64 frame = after; frame >= first; --frame) {
+        const u64 timestamp =
+            g_nx2_present_times_ns[frame % capacity].load(std::memory_order_relaxed);
+        // The counter advances before its store; the slot can also be overwritten during a read.
+        if (timestamp < begin_ns || timestamp > end_ns) {
+            truncated |= timestamp > end_ns;
+            previous = 0;
+            continue;
+        }
+        if (previous != 0 && timestamp > previous) {
+            intervals.clear();
+        } else if (previous != 0) {
+            intervals.push_back(static_cast<double>(previous - timestamp) / 1'000'000.0);
+        }
+        previous = timestamp;
+    }
+
+    std::ranges::reverse(intervals);
+    return IntervalStats(std::move(intervals), refresh_hz, truncated, false, recent_limit);
+}
+
+json ReadInputFrameTimes(u64 first, u64 total, u64 begin_ns, u64 end_ns) {
+    if (first == 0 || total == 0 || total > 2048 || first + total < first) {
+        throw std::runtime_error{"invalid measured input range"};
+    }
+    const u64 last = first + total - 1;
+    const u64 capacity = g_nx2_present_times_ns.size();
+    const u64 before = g_nx2_present_count.load(std::memory_order_seq_cst);
+    std::vector<double> intervals;
+    u64 previous = 0;
+    bool complete = before > last && before - first < capacity;
+    for (u64 frame = first; complete && frame <= last; ++frame) {
+        const u64 timestamp = g_nx2_present_times_ns[frame % capacity].load(std::memory_order_seq_cst);
+        // A pending store retains zero or a timestamp from before input; neither is accepted.
+        if (timestamp == 0 || timestamp < begin_ns || timestamp > end_ns ||
+            (previous && timestamp <= previous)) {
+            complete = false;
+            break;
+        }
+        if (previous) {
+            intervals.push_back(static_cast<double>(timestamp - previous) / 1'000'000.0);
+        }
+        previous = timestamp;
+    }
+    const u64 after = g_nx2_present_count.load(std::memory_order_seq_cst);
+    complete &= after >= before && after - first < capacity;
+    if (!complete) {
+        intervals.clear();
+    }
+    auto result = IntervalStats(std::move(intervals), 60.0, !complete, true);
+    result.update({{"supported", "held-input-v1"}, {"first_present", first},
+                   {"last_present", last}, {"expected_intervals", total - 1},
+                   {"complete", complete}, {"covered_presents", complete ? total : 0},
+                   {"snapshot_before", before}, {"snapshot_after", after}});
+    return result;
 }
 
 
@@ -672,13 +714,23 @@ json ReadGpuMemory(ToolState& state, const json& params) {
 /// last step; leaving this function by any path removes it.
 json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json& params,
               const ClientGone& client_gone) {
+    // Timed steps follow host time, for games that advance by elapsed time rather than per present.
+    const bool timed = steps.front().ms != 0;
     u64 total = 0;
     for (const InputStep& step : steps) {
-        total += step.frames;
+        if ((step.ms != 0) != timed) {
+            throw std::runtime_error{"steps mix frames and ms; use one unit per call"};
+        }
+        total += timed ? step.ms : step.frames;
     }
-    if (total > MAX_INPUT_FRAMES) {
-        throw std::runtime_error{
-            fmt::format("{} frames in total; at most {} per call", total, MAX_INPUT_FRAMES)};
+    if (total > (timed ? MAX_INPUT_MS : MAX_INPUT_FRAMES)) {
+        throw std::runtime_error{fmt::format("{} {} in total; at most {} per call", total,
+                                             timed ? "ms" : "frames",
+                                             timed ? MAX_INPUT_MS : MAX_INPUT_FRAMES)};
+    }
+    const bool measure = params.value("measure", false);
+    if (measure && !timed && total > 2048) {
+        throw std::runtime_error{"measured input is limited to 2048 presents"};
     }
     auto& hid = state.system.HIDCore();
     HID::EmulatedController* controller = hid.GetEmulatedController(HID::NpadIdType::Player1);
@@ -690,20 +742,39 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     if (!controller->IsConnected()) {
         throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
     }
-    const int timeout = Param<int>(params, "timeout_s", static_cast<int>(total / 20 + 10), 1, 900);
+    const u64 total_s = timed ? total / 1000 : total / 20;
+    const int timeout = Param<int>(params, "timeout_s", static_cast<int>(total_s + 10), 1, 900);
+    if (timed && std::chrono::seconds{timeout} <= std::chrono::milliseconds{total}) {
+        throw std::runtime_error{
+            fmt::format("timeout_s {} does not exceed the {} ms of input", timeout, total)};
+    }
+    const auto begin = std::chrono::steady_clock::now();
     const u64 start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
     const auto script = std::make_shared<const std::vector<InputStep>>(steps);
-    controller->SetInputInjector([script, start] {
-        return InputAt(*script, start, g_nx2_present_count.load(std::memory_order_relaxed));
-    });
+    if (timed) {
+        controller->SetInputInjector([script, begin] {
+            const auto elapsed = std::chrono::steady_clock::now() - begin;
+            return InputAtTime(
+                *script, static_cast<u64>(
+                             std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+        });
+    } else {
+        controller->SetInputInjector([script, start] {
+            return InputAt(*script, start, g_nx2_present_count.load(std::memory_order_relaxed));
+        });
+    }
     SCOPE_EXIT {
         controller->SetInputInjector({});
     };
-    const auto begin = std::chrono::steady_clock::now();
+    if (measure && !timed && g_nx2_present_count.load(std::memory_order_relaxed) >= start) {
+        throw std::runtime_error{"present advanced while installing input; input released"};
+    }
     const auto deadline = begin + std::chrono::seconds{timeout};
+    const auto timed_end = begin + std::chrono::milliseconds{timed ? total : 0};
+    u64 now = start - 1;
     for (;;) {
-        const u64 now = g_nx2_present_count.load(std::memory_order_relaxed);
-        if (now >= start + total) {
+        now = g_nx2_present_count.load(std::memory_order_relaxed);
+        if (timed ? std::chrono::steady_clock::now() >= timed_end : now >= start + total) {
             break;
         }
         if (state.stopping.load(std::memory_order_relaxed)) {
@@ -715,24 +786,69 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             throw std::runtime_error{fmt::format(
-                "{} of {} frames were presented within {} s (paused or loading?); input released",
-                now >= start ? now - start : 0, total, timeout)};
+                "{} of {} {} passed within {} s (paused or loading?); input released",
+                timed ? static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - begin)
+                                             .count())
+                      : (now >= start ? now - start : 0),
+                total, timed ? "ms" : "frames", timeout)};
         }
-        std::this_thread::sleep_for(2ms);
+        std::this_thread::sleep_for(timed ? 1ms : 2ms);
     }
-    return {
+    // Timed: the presents that began inside the window, except the last, whose timestamp may
+    // still be pending. The count was read after the window ended, so drop presents stamped later.
+    const auto ns = [](auto time) -> u64 {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
+    };
+    const u64 capacity = g_nx2_present_times_ns.size();
+    u64 presents = timed ? (now >= start + 1 ? now - start : 0) : total;
+    while (timed && presents != 0 && presents <= capacity &&
+           g_nx2_present_times_ns[(start + presents - 1) % capacity].load() > ns(timed_end)) {
+        --presents;
+    }
+    json result = {
         {"controller", name},
         {"steps", steps.size()},
-        {"frames", total},
+        {"frames", presents},
         {"first_present", start},
         {"elapsed_s",
          std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()},
     };
+    if (timed) {
+        result["ms"] = total;
+        result["clock"] = "host_time";
+    }
+    if (measure) {
+        if (timed && (presents < 2 || presents > 2048)) {
+            json empty = IntervalStats({}, 60.0, true, true);
+            empty.update({{"supported", "held-input-v1"}, {"first_present", start},
+                          {"last_present", start + presents - 1}, {"expected_intervals", 0},
+                          {"complete", false}, {"covered_presents", 0}});
+            result["measurement"] = std::move(empty);
+        } else {
+            result["measurement"] = ReadInputFrameTimes(start, presents, ns(begin),
+                                                       ns(std::chrono::steady_clock::now()));
+        }
+        json& measurement = result["measurement"];
+        if (timed && measurement["complete"].get<bool>()) {
+            // Intervals only span the counted presents; a stall before the first or after the
+            // last one is not in them, so report the uncovered ends of the window.
+            const u64 first_ns = g_nx2_present_times_ns[start % capacity].load();
+            const u64 last_ns = g_nx2_present_times_ns[(start + presents - 1) % capacity].load();
+            measurement["window_ms"] = total;
+            measurement["head_ms"] = static_cast<double>(first_ns - ns(begin)) / 1'000'000.0;
+            measurement["tail_ms"] =
+                static_cast<double>(ns(timed_end) - (std::min)(last_ns, ns(timed_end))) /
+                1'000'000.0;
+        }
+    }
+    return result;
 }
 
 json Input(ToolState& state, const json& params, const ClientGone& client_gone) {
     json step = params;
     step.erase("timeout_s");
+    step.erase("measure");
     return RunInput(state, {ParseInputStep(step)}, params, client_gone);
 }
 
@@ -940,18 +1056,30 @@ InputStep ParseInputStep(const json& step) {
         throw std::runtime_error{"a step is an object"};
     }
     for (const auto& [key, value] : step.items()) {
-        if (key != "buttons" && key != "left_stick" && key != "right_stick" && key != "frames") {
+        if (key != "buttons" && key != "left_stick" && key != "right_stick" && key != "frames" &&
+            key != "ms") {
             throw std::runtime_error{fmt::format(
-                "unknown key \"{}\": want buttons, left_stick, right_stick, frames", key)};
+                "unknown key \"{}\": want buttons, left_stick, right_stick, frames or ms", key)};
         }
     }
     InputStep result{.input = {}, .frames = 0};
-    const json& frames = step.at("frames");
-    if (!frames.is_number_integer() || frames.get<s64>() < 1 ||
-        frames.get<u64>() > MAX_INPUT_FRAMES) {
-        throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_INPUT_FRAMES)};
+    if (step.contains("frames") == step.contains("ms")) {
+        throw std::runtime_error{"a step needs exactly one of frames and ms"};
     }
-    result.frames = frames.get<u64>();
+    if (step.contains("ms")) {
+        const json& ms = step.at("ms");
+        if (!ms.is_number_integer() || ms.get<s64>() < 1 || ms.get<u64>() > MAX_INPUT_MS) {
+            throw std::runtime_error{fmt::format("ms must be 1 to {}", MAX_INPUT_MS)};
+        }
+        result.ms = ms.get<u64>();
+    } else {
+        const json& frames = step.at("frames");
+        if (!frames.is_number_integer() || frames.get<s64>() < 1 ||
+            frames.get<u64>() > MAX_INPUT_FRAMES) {
+            throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_INPUT_FRAMES)};
+        }
+        result.frames = frames.get<u64>();
+    }
     for (const json& button : step.value("buttons", json::array())) {
         const std::string text = button.is_string() ? button.get<std::string>() : button.dump();
         const auto it = std::ranges::find(INPUT_BUTTONS, std::string_view{text},
@@ -993,6 +1121,17 @@ std::optional<HID::InjectedInput> InputAt(std::span<const InputStep> steps, u64 
     for (const InputStep& step : steps) {
         end += step.frames;
         if (now < end) {
+            return step.input;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<HID::InjectedInput> InputAtTime(std::span<const InputStep> steps, u64 elapsed_us) {
+    u64 end = 0;
+    for (const InputStep& step : steps) {
+        end += step.ms * 1000;
+        if (elapsed_us < end) {
             return step.input;
         }
     }
