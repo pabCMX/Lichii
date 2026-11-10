@@ -983,3 +983,61 @@ TEST_CASE("Input recordings hold presses shorter than a present unless the mode 
     REQUIRE_THROWS(Core::Nx2Debug::CallTool(system, "input_record",
                                             {{"action", "start"}, {"mode", "every"}}));
 }
+
+TEST_CASE("Luma watch keeps one sample per composite until it is done", "[core][nx2_debug_server]") {
+    using VideoCore::Nx2Debug::MeanLuma;
+    SCOPE_EXIT {
+        VideoCore::Nx2Debug::ArmLumaWatch(0);
+    };
+    // BGRA8: black, white, then pure red (Rec. 601 weight 77/256 of 255).
+    REQUIRE(MeanLuma(std::vector<u8>{0, 0, 0, 255}) == 0.0f);
+    REQUIRE(MeanLuma(std::vector<u8>{255, 255, 255, 255}) == 255.0f);
+    REQUIRE(MeanLuma(std::vector<u8>{0, 0, 255, 255, 0, 0, 255, 255}) ==
+            static_cast<float>(77.0 * 255.0 / 256.0));
+    REQUIRE(MeanLuma({}) == 0.0f);
+
+    const std::vector<u8> black(64, 0);
+    const std::vector<u8> white(64, 255);
+    REQUIRE_FALSE(VideoCore::Nx2Debug::LumaWatchArmed());
+    VideoCore::Nx2Debug::AddLumaSample(1, white);
+    REQUIRE(VideoCore::Nx2Debug::ReadLumaWatch().first.empty());
+    VideoCore::Nx2Debug::ArmLumaWatch(3);
+    REQUIRE(VideoCore::Nx2Debug::LumaWatchArmed());
+    VideoCore::Nx2Debug::AddLumaSample(10, black);
+    VideoCore::Nx2Debug::AddLumaSample(11, black);
+    VideoCore::Nx2Debug::AddLumaSample(12, white);
+    VideoCore::Nx2Debug::AddLumaSample(13, white);
+    REQUIRE_FALSE(VideoCore::Nx2Debug::LumaWatchArmed());
+    const auto [samples, remaining] = VideoCore::Nx2Debug::ReadLumaWatch();
+    REQUIRE(remaining == 0);
+    REQUIRE(samples.size() == 3);
+    REQUIRE(samples[0].present == 10);
+    REQUIRE(samples[1].luma == 0.0f);
+    REQUIRE(samples[2].present == 12);
+    REQUIRE(samples[2].luma == 255.0f);
+
+    // The method: arm, read while nothing composites (no renderer here), cancel.
+    ScopedSystemTestContext context;
+    Core::System system;
+    const auto call = [&system](const json& params) {
+        return Core::Nx2Debug::CallTool(system, "luma_watch", params);
+    };
+    REQUIRE(call({{"presents", 2}})["armed"] == 2);
+    const json pending = call(json::object());
+    REQUIRE(pending["done"] == false);
+    REQUIRE(pending["remaining"] == 2);
+    REQUIRE(pending["samples"].empty());
+    VideoCore::Nx2Debug::AddLumaSample(20, white);
+    VideoCore::Nx2Debug::AddLumaSample(21, black);
+    REQUIRE(call({{"wait_s", 1}}) ==
+            json{{"samples", {{20, 255.0}, {21, 0.0}}}, {"remaining", 0}, {"done", true}});
+    REQUIRE(call({{"presents", 5}})["armed"] == 5);
+    REQUIRE(call({{"cancel", true}})["armed"] == 0);
+    REQUIRE_FALSE(VideoCore::Nx2Debug::LumaWatchArmed());
+    REQUIRE(call({{"presents", 3600}})["armed"] == 3600);
+    REQUIRE_THROWS(call({{"presents", 0}}));
+    REQUIRE_THROWS(call({{"presents", -1}}));
+    REQUIRE_THROWS(call({{"presents", 3601}}));
+    REQUIRE_THROWS(call({{"presents", 2.5}}));
+    REQUIRE_THROWS(call({{"frames", 2}}));
+}

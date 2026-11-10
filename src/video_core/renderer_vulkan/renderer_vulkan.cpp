@@ -20,6 +20,7 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/graphics_context.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
 #include "video_core/nx2_profile.h"
@@ -301,6 +302,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         VideoCommon::StutterTrace::OnPresent();
     }
     RenderScreenshot(framebuffers);
+    RenderLumaSample(framebuffers);
     const auto acquiring = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
     Frame* frame = [this] {
@@ -522,6 +524,19 @@ void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> 
                 dst_buffer.Mapped().size());
     renderer_settings.screenshot_complete_callback(false);
     renderer_settings.screenshot_requested = false;
+}
+
+void RendererVulkan::RenderLumaSample(std::span<const Tegra::FramebufferConfig> framebuffers) {
+    if (!VideoCore::Nx2Debug::LumaWatchArmed()) {
+        return;
+    }
+    const auto layers = Tegra::FilterLayerStack(
+        framebuffers, Service::Nvnflinger::LayerStackId::Default, luma_layer_scratch);
+    const auto layout = Layout::DefaultFrameLayout(VideoCore::Nx2Debug::LumaWatchWidth,
+                                                   VideoCore::Nx2Debug::LumaWatchHeight);
+    const auto buffer = RenderToBuffer(layers, layout, VK_FORMAT_B8G8R8A8_UNORM,
+                                       VkDeviceSize{layout.width} * layout.height * 4);
+    VideoCore::Nx2Debug::AddLumaSample(buffer.Mapped());
 }
 
 std::vector<u8> RendererVulkan::GetAppletCaptureBuffer() {

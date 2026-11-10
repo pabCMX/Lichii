@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common/common_types.h"
@@ -103,5 +104,28 @@ u64 SetRejected(std::span<const u64> hashes, bool rejected);
 void NoteRejectApplied(u64 generation);
 /// Server thread: waits until the rasterizer applied the generation.
 [[nodiscard]] bool WaitRejectApplied(u64 generation, std::chrono::milliseconds timeout);
+
+/// One luma_watch sample: the guest present of a composite and the mean luma of its frame.
+struct LumaSample {
+    u64 present;
+    float luma;
+};
+/// The frame copy each armed composite renders, through the screenshot path.
+constexpr u32 LumaWatchWidth = 256;
+constexpr u32 LumaWatchHeight = 144;
+/// Server thread: the next `composites` composites each take a luma sample. Replaces a running
+/// watch and its samples; 0 disarms. Ending the session disarms too.
+void ArmLumaWatch(u32 composites);
+/// Server thread: the samples since the last arm, and how many composites the watch still takes.
+[[nodiscard]] std::pair<std::vector<LumaSample>, u32> ReadLumaWatch();
+/// Renderer, in each composite: whether to render a frame copy for AddLumaSample. One relaxed
+/// load while disarmed.
+[[nodiscard]] bool LumaWatchArmed() noexcept;
+/// Adds the BGRA8 frame copy of the composite of guest present `present`.
+void AddLumaSample(u64 present, std::span<const u8> bgra);
+/// Renderer, inside a composite: adds its BGRA8 frame copy, for the composite's guest present.
+void AddLumaSample(std::span<const u8> bgra);
+/// The mean Rec. 601 luma of a BGRA8 image, 0 to 255.
+[[nodiscard]] float MeanLuma(std::span<const u8> bgra);
 
 } // namespace VideoCore::Nx2Debug

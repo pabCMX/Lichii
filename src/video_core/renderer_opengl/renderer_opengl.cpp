@@ -16,6 +16,7 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/emu_window.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/capture.h"
 #include "video_core/present.h"
 #include "video_core/renderer_opengl/gl_blit_screen.h"
@@ -141,6 +142,7 @@ void RendererOpenGL::Composite(std::span<const Tegra::FramebufferConfig> framebu
 
     RenderAppletCaptureLayer(framebuffers);
     RenderScreenshot(framebuffers);
+    RenderLumaSample(framebuffers);
 
     state_tracker.BindFramebuffer(0);
     blit_screen->DrawScreen(framebuffers, emu_window.GetFramebufferLayout(), false);
@@ -213,6 +215,19 @@ void RendererOpenGL::RenderScreenshot(std::span<const Tegra::FramebufferConfig> 
 
     renderer_settings.screenshot_complete_callback(true);
     renderer_settings.screenshot_requested = false;
+}
+
+void RendererOpenGL::RenderLumaSample(std::span<const Tegra::FramebufferConfig> framebuffers) {
+    if (!VideoCore::Nx2Debug::LumaWatchArmed()) {
+        return;
+    }
+    const auto layers = Tegra::FilterLayerStack(
+        framebuffers, Service::Nvnflinger::LayerStackId::Default, luma_layer_scratch);
+    const auto layout = Layout::DefaultFrameLayout(VideoCore::Nx2Debug::LumaWatchWidth,
+                                                   VideoCore::Nx2Debug::LumaWatchHeight);
+    std::vector<u8> pixels(size_t{layout.width} * layout.height * 4);
+    RenderToBuffer(layers, layout, pixels.data());
+    VideoCore::Nx2Debug::AddLumaSample(pixels);
 }
 
 void RendererOpenGL::RenderAppletCaptureLayer(
