@@ -198,7 +198,8 @@ TEST_CASE("Measured input excludes boundary frames and rejects incomplete covera
     Core::g_nx2_present_count = 4106;
     REQUIRE(read(2)["truncated"] == true);
     REQUIRE_THROWS(read(0));
-    REQUIRE_THROWS(read(2049));
+    REQUIRE_NOTHROW(read(3840));
+    REQUIRE_THROWS(read(3841));
 }
 
 TEST_CASE("Debug server requests map to handlers", "[core][nx2_debug_server]") {
