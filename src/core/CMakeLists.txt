@@ -56,6 +56,8 @@ add_library(core STATIC
     debugger/nx2_debug_tools.h
     debugger/nx2_zip.cpp
     debugger/nx2_zip.h
+    debugger/nx2_trainer_tools.cpp
+    debugger/nx2_trainer_tools.h
     device_memory.cpp
     device_memory.h
     device_memory_manager.h

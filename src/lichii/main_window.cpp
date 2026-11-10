@@ -3,6 +3,7 @@
 
 // Static Qt on macOS doesn't use Vulkan
 // Other platforms do, and thus have conflicting VulkanMemoryAllocator symbols
+#include "core/debugger/nx2_trainer_tools.h"
 #include "core/launch_params.h"
 #if defined(QT_STATICPLUGIN) && !defined(__APPLE__)
 #undef VMA_IMPLEMENTATION
@@ -404,6 +405,21 @@ MainWindow::MainWindow(bool has_broken_vulkan)
       input_subsystem{std::make_shared<InputCommon::InputSubsystem>()}, user_data_migrator{this} {
     QtCommon::Init(this);
 
+    // The debug server's pause, resume and step_frames use the pause button's slots
+    // (docs/nx2/trainer-kit.md). Queued: the server thread must not wait on the GUI thread, which
+    // stops the server when a game shuts down.
+    Core::Nx2Debug::SetRunControl([this](bool run) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, run] {
+                if (emulation_running && QtCommon::emu_thread &&
+                    QtCommon::emu_thread->IsRunning() != run) {
+                    run ? OnStartGame() : OnPauseGame();
+                }
+            },
+            Qt::QueuedConnection);
+    });
+
     Common::FS::CreateEdenPaths();
     this->config = std::make_unique<QtConfig>();
 
@@ -602,6 +618,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 }
 
 MainWindow::~MainWindow() {
+    Core::Nx2Debug::SetRunControl({});
     if (nup_cancel) {
         nup_cancel->store(true);
     }

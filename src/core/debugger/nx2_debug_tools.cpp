@@ -34,6 +34,7 @@
 #include "core/debugger/nx2_bug_bundle.h"
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
+#include "core/debugger/nx2_trainer_tools.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
@@ -1613,7 +1614,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
             return tool(*state, params, client_gone);
         };
     };
-    return {
+    Handlers handlers{
         {"status", handler(Status)},
         {"features", handler(Features)},
         {"frame_times", handler(FrameTimes)},
@@ -1637,6 +1638,9 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"input_record", handler(InputRecord)},
         {"luma_watch", waiting(LumaWatch)},
     };
+    AddTrainerHandlers(handlers, state->system,
+                       [state] { return state->stopping.load(std::memory_order_relaxed); });
+    return handlers;
 }
 
 } // Anonymous namespace

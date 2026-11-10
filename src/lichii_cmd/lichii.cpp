@@ -41,6 +41,7 @@
 #include "common/string_util.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/debugger/nx2_trainer_tools.h"
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/common_funcs.h"
@@ -809,6 +810,10 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     });
 
     void(state->system.Run());
+    // No menus to keep in step: the debug server's pause and resume drive the system directly.
+    Core::Nx2Debug::SetRunControl([&system = state->system](bool run) {
+        void(run ? system.Run() : system.Pause());
+    });
     if (state->system.DebuggerEnabled())
         state->system.InitializeDebugger();
     return SDL_APP_CONTINUE;
@@ -890,6 +895,7 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     if (!state) {
         return;
     }
+    Core::Nx2Debug::SetRunControl({});
     state->system.DetachDebugger();
     // SDL calls this even when SDL_AppInit never powered the system on (no ROM given, --help or
     // --version): the kernel is uninitialised then, and Pause()/ShutdownMainProcess() would
