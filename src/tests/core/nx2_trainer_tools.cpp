@@ -232,6 +232,28 @@ TEST_CASE("step_frames with capture records the last stepped present, as the fra
         REQUIRE(result["advanced"].get<u64>() >= (std::max<u64>)(frames, 2));
     }
 
+    // A frontend whose pause lands one present late: the capture stays of capture_present, and the
+    // reply says how far the game ran past it.
+    Core::Nx2Debug::SetRunControl([&](bool run) {
+        if (!run) {
+            const u64 at = Core::g_nx2_present_count.load();
+            while (Core::g_nx2_present_count.load() < at + 1) {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+        paused = !run;
+    });
+    events.clear();
+    {
+        const u64 before = Core::g_nx2_present_count.load();
+        const json late = call({{"frames", 1}, {"capture", true}});
+        REQUIRE(late["capture"]["recorded_present"] == late["capture_present"]);
+        REQUIRE(late["capture_present"].get<u64>() == before + 2);
+        REQUIRE(late["overshoot"].get<u64>() >= 1);
+        REQUIRE(late["presents"].get<u64>() == late["capture_present"].get<u64>() + late["overshoot"].get<u64>());
+    }
+    Core::Nx2Debug::SetRunControl([&](bool run) { paused = !run; });
+
     // A step that presents nothing withdraws the request: no capture of a later frame.
     events.clear();
     presenting = false;

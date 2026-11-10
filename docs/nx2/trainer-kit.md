@@ -40,8 +40,12 @@ the last stepped present. A capture needs two presents. At the end of a frame,
 NEXT frame and finishes at that frame's end. So the call steps at least two presents. It steps all
 but the last two, pauses, waits 100 ms for the GPU to finish the frames queued before the pause,
 requests the capture while the game is paused, then steps the last two. `{frames: 1, capture:
-true}` therefore advances two presents and captures the frame the game stops on. The reply adds
-`capture` (as `capture_frame` answers) and `capture_present`. If the step does not present within
+true}` therefore advances two presents. The capture is of exactly `capture_present`, the last
+stepped present. The pause itself goes through the frontend and can land a present or two later,
+as for any step: `overshoot` in the reply says how many presents the game ran past the captured
+frame (0 when it stopped on it). An exact stop would need the emulator to hold the guest at a
+present, which the kit does not do. The reply adds `capture` (as `capture_frame` answers),
+`capture_present` and `overshoot`. If the step does not present within
 the timeout, the request is withdrawn and the call fails, so no later frame is captured.
 
 While the game is paused, `capture_frame` and `screenshot` fail at once ("paused: ... needs a
@@ -251,9 +255,9 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
    the block: stop and report.
 3. `pause`: the Qt menu shows paused, `status.paused` is true. `resume`: both clear.
 4. `step_frames {frames: 1}` ten times: each `advanced` is 1 to 3, the game is paused after
-   each. Then `step_frames {frames: 1, capture: true}` five times: each advances 2 presents,
-   answers with a `capture` whose files exist, and its frame is the one the game is paused on (the
-   next `screenshot` after a resume is not needed: compare with the window). A plain `capture_frame` or
+   each. Then `step_frames {frames: 1, capture: true}` five times: each advances 2 presents and
+   answers with a `capture` whose files exist. Record `overshoot` each time: with 0 the captured
+   frame is the one on screen. A plain `capture_frame` or
    `screenshot` while paused fails at once with "paused: ... needs a present".
 5. `time_control {mode: "scale", value: 0.5}`: Link walks at half speed. `value: 2`: double.
    `off`: normal.
