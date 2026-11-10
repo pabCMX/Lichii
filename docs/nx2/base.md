@@ -25,7 +25,8 @@ Debug-server parameters and methods, in `src/core/debugger/nx2_debug_tools.cpp`:
 - `measure: true` adds `measurement`: the present intervals of the held input.
 - `input_record` records the game's input once per present, as steps `input_sequence` replays
   (H48). It adds `g_nx2_present_hook` to the present path and `HID::g_npad_read_hook` to the
-  npad updater (mode `any`: every button given during a present), and raises the limits to 6000 steps
+  npad updater (mode `any`: every button given during a present) and `g_nx2_present_reply_hook`
+  before the present's reply (mode `any`: the stick the game reads after it), and raises the limits to 6000 steps
   per call and 3840 measured presents. The Qt hotkey Record Input (Per Present), default
   Ctrl+F8, starts and stops it and saves the steps to `<user dir>/tas/present-record-<n>.json`.
 - `start_present` on `input` and `input_sequence` puts step 0 at that present; `screenshot`

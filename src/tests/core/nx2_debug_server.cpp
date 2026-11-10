@@ -540,8 +540,8 @@ TEST_CASE("Debug timed input steps bound ms and never count presents", "[core][n
 
 namespace {
 
-/// Stamps a present every 2 ms, like the GPU thread at 500 fps, and calls the present hook as
-/// nx2_gsv.h does, until it is destroyed.
+/// Stamps a present every 2 ms, like the GPU thread at 500 fps, and calls the present and reply
+/// hooks as nx2_gsv.h does, until it is destroyed.
 class FakePresenter {
 public:
     FakePresenter()
@@ -554,6 +554,9 @@ public:
                           .count();
                   if (const auto hook = Core::g_nx2_present_hook.load()) {
                       hook(present);
+                  }
+                  if (const auto reply = Core::g_nx2_present_reply_hook.load()) {
+                      reply(present);
                   }
                   std::this_thread::sleep_for(2ms);
               }
@@ -1050,4 +1053,60 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
                    "landed_present", "screenshot_present", "luma_watch"}},
                  {"kit", 1}});
+}
+
+TEST_CASE("Input recordings take the stick at the present's reply", "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    s32 stick_x = 0;
+    controller.SetInputInjector([&stick_x] {
+        return std::optional{Core::HID::InjectedInput{
+            .buttons = {}, .left = Core::HID::AnalogStickState{.x = stick_x, .y = 0}, .right = {}}};
+    });
+    const auto old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        if (Core::g_nx2_present_hook.load() != nullptr) {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}}));
+        }
+        controller.SetInputInjector({});
+        Core::g_nx2_present_count = old_count;
+    };
+    REQUIRE(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "start"}})["mode"] ==
+            "any");
+    // Per count: the stick when the present is counted, and when its reply goes back.
+    const std::vector<std::pair<s32, s32>> counts{{1000, 2000}, {3000, 4000}, {5000, 6000}};
+    for (const auto& [at_count, at_reply] : counts) {
+        stick_x = at_count;
+        const u64 present = ++Core::g_nx2_present_count;
+        Core::g_nx2_present_hook.load()(present);
+        stick_x = at_reply;
+        Core::g_nx2_present_reply_hook.load()(present);
+    }
+    // The last count's present has no reply yet: it keeps the stick of its start.
+    stick_x = 7000;
+    Core::g_nx2_present_hook.load()(++Core::g_nx2_present_count);
+    const json stopped = Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}});
+    REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
+    const auto sticks = [](const json& steps) {
+        std::vector<s32> x;
+        for (const json& step : steps) {
+            const auto parsed = Core::Nx2Debug::ParseInputStep(step);
+            x.insert(x.end(), parsed.frames, parsed.input.left->x);
+        }
+        return x;
+    };
+    REQUIRE(sticks(stopped["steps"]) == std::vector<s32>{2000, 4000, 6000, 7000});
+    REQUIRE(sticks(stopped["steps_at_count"]) == std::vector<s32>{1000, 3000, 5000, 7000});
+    REQUIRE(stopped["presents"] == 4);
+    REQUIRE(stopped["blocked_us"]["presents"] == 3);
+    REQUIRE(stopped["blocked_us"]["max"].get<u64>() >= stopped["blocked_us"]["mean"].get<u64>());
+    // Mode sample keeps one phase and no blocked time.
+    static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record",
+                                               {{"action", "start"}, {"mode", "sample"}}));
+    const json sampled = Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}});
+    REQUIRE_FALSE(sampled.contains("steps_at_count"));
+    REQUIRE_FALSE(sampled.contains("blocked_us"));
 }
