@@ -921,18 +921,28 @@ thread_local bool in_forced_npad_update = false;
 std::mutex reply_hook_mutex;
 int reply_hook_users = 0;
 
+/// The trainer's step trace at each present's reply (SetPresentReplyTrace), or null.
+std::atomic<void (*)(u64)> reply_trace{};
+
+/// Under reply_hook_mutex: the reply hook is on while a replay, a recording or the trace uses it.
+void UpdateReplyHook() {
+    const bool on = reply_hook_users > 0 || reply_trace.load(std::memory_order_relaxed) != nullptr;
+    g_nx2_present_reply_hook.store(on ? PresentReply : nullptr, std::memory_order_release);
+}
+
 void UseReplyHook() {
     std::scoped_lock lock{reply_hook_mutex};
     if (reply_hook_users++ == 0) {
         ::Service::HID::g_npad_update_stamps.store(true, std::memory_order_relaxed);
-        g_nx2_present_reply_hook.store(PresentReply, std::memory_order_release);
     }
+    UpdateReplyHook();
 }
 
 void DropReplyHook() {
     std::scoped_lock lock{reply_hook_mutex};
-    if (--reply_hook_users == 0) {
-        g_nx2_present_reply_hook.store(nullptr, std::memory_order_release);
+    --reply_hook_users;
+    UpdateReplyHook();
+    if (reply_hook_users == 0) {
         ::Service::HID::g_npad_update_stamps.store(false, std::memory_order_relaxed);
     }
 }
@@ -1433,6 +1443,9 @@ void PresentReply(u64 present) {
         in_forced_npad_update = false;
     }
     RecordPresentReply(present);
+    if (const auto trace = reply_trace.load(std::memory_order_acquire)) {
+        trace(present);
+    }
 }
 
 /// Ends any recording without a result, so neither the present path nor the npad updater reads
@@ -1773,6 +1786,12 @@ json FormatMemory(std::span<const u8> bytes, std::string_view as) {
         }
     }
     return {{std::string{as}, std::move(values)}};
+}
+
+void SetPresentReplyTrace(void (*trace)(u64)) {
+    std::scoped_lock lock{reply_hook_mutex};
+    reply_trace.store(trace, std::memory_order_release);
+    UpdateReplyHook();
 }
 
 std::optional<u64> ReadGuestMemory(Memory::Memory& memory, u64 address, std::span<u8> out) {

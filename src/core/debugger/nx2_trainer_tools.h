@@ -3,9 +3,14 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
+#include <map>
+#include <set>
 #include <span>
+#include <utility>
 #include <string_view>
+#include <vector>
 
 #include "core/debugger/nx2_debug_server.h"
 
@@ -57,5 +62,54 @@ struct RunState {
 /// As above with a given run state (for tests).
 void AddTrainerHandlers(Handlers& handlers, System& system, RunState run,
                         std::function<bool()> stopping, CaptureStart capture = {});
+
+/// The host side of the time_control step trace (docs/nx2/trainer-kit.md, "Step trace"). At each
+/// present the present hook gives Add the guest trace area (OotTimeControl::TraceSize bytes:
+/// magic, count, then the last 8 calls); Add keeps the calls made since the previous present,
+/// stamped with this present. Not thread-safe: the trainer tools hold a lock around it.
+class StepTrace {
+public:
+    static constexpr size_t KeptRecords = 256; ///< records Summary lists, the first ones
+    static constexpr size_t MaxDistinct = 32;  ///< distinct values listed per field
+
+    /// Starts a trace of `presents` presents. count is the guest count at the arm: the call in
+    /// progress then may be half written, so the first call is skipped.
+    void Arm(u32 count, u64 presents);
+    /// One present's copy of the trace area. Returns false once the trace has its presents (the
+    /// caller then stops the guest side).
+    bool Add(u64 present, std::span<const u8> area);
+    void Stop() {
+        armed = false;
+    }
+    [[nodiscard]] bool Armed() const {
+        return armed;
+    }
+    /// {armed, presents, wanted, calls, dropped, first_present, last_present, calls_per_present,
+    /// s1, s0, own_step, step}, each value field {min, max, distinct, more_distinct, nan}; with
+    /// records, the first KeptRecords as [present, s1, s0, own_step, step].
+    [[nodiscard]] nlohmann::json Summary(bool records) const;
+
+private:
+    struct Field {
+        float min{};
+        float max{};
+        std::set<float> distinct;
+        bool more{};
+        u64 nan{}; ///< NaN values: counted here, not in min, max or distinct
+        bool seen{};
+        void Add(float value);
+    };
+    bool armed{};
+    u32 next{};
+    u64 wanted{};
+    u64 presents{};
+    u64 calls{};
+    u64 dropped{};
+    u64 first_present{};
+    u64 last_present{};
+    std::map<u32, u64> per_present; ///< calls in one present -> presents
+    std::array<Field, 4> fields{};  ///< s1, s0, own step, step returned
+    std::vector<std::pair<u64, std::array<float, 4>>> kept; ///< present, the four fields
+};
 
 } // namespace Core::Nx2Debug

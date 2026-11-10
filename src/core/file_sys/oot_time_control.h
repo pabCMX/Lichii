@@ -23,6 +23,18 @@ constexpr size_t RoutineOffset = 0x3C46300;
 /// After the add-on timer state at 0x4E9FE00 (0xA0 bytes with PR #1152).
 constexpr size_t BlockOffset = 0x4E9FF00;
 constexpr size_t BlockSize = 16;
+constexpr size_t RoutineSize = 188;
+
+/// The step trace, right after the control block (time_control {trace}): u32 magic, u32 count
+/// (calls the routine traced; only the routine writes it), 8 reserved bytes, then TraceRecords
+/// records of f32 s1, s0, the game's own step and the step returned. Call i is record i % 8. The
+/// routine traces only while the magic is TraceMagic, also when the control block has no magic.
+constexpr size_t TraceOffset = BlockOffset + BlockSize;
+constexpr size_t TraceRecords = 8;
+constexpr size_t TraceRecordSize = 16;
+constexpr size_t TraceSize = 16 + TraceRecords * TraceRecordSize;
+constexpr u32 TraceMagic = 0x45435254;    // "TRCE"
+constexpr u32 TraceOffMagic = 0x65637274; // "trce": ours, not tracing
 
 /// The control block: magic, mode, value (f32), reserved. The routine ignores the block until the
 /// magic is there, so a zero block, or one the game wrote, leaves the step alone.

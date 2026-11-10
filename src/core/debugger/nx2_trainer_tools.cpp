@@ -16,6 +16,7 @@
 
 #include <fmt/format.h>
 
+#include "common/nx2_kit_stall.h"
 #include "common/nx2_live_switch.h"
 #include "core/core.h"
 #include "core/debugger/nx2_debug_tools.h"
@@ -38,6 +39,8 @@ constexpr u64 MAX_STEP_FRAMES = 600;
 constexpr float MIN_STEP = 0.01f;
 constexpr float MAX_SCALE = 4.0f;
 constexpr float MAX_FIXED_STEP = 6.0f;
+/// time_control {trace: N}: at most 10 minutes at 60 presents a second.
+constexpr u64 MAX_TRACE_PRESENTS = 36000;
 
 std::mutex g_control_mutex;
 RunControl g_control;
@@ -71,11 +74,61 @@ const std::array<LiveSwitchInfo, SWITCHES.size()> SWITCH_INFO = [] {
     return info;
 }();
 
+/// The armed step trace: the present hook copies the guest trace area into trace. memory is the
+/// game's while armed; the session's end clears the hook first (StopTraceHook).
+struct TraceHost {
+    std::mutex mutex;
+    Memory::Memory* memory{};
+    u64 address{}; ///< the guest trace area
+    StepTrace trace;
+    std::string error; ///< why the trace stopped early, if it did
+};
+TraceHost g_trace;
+
+u32 Load32(std::span<const u8> bytes, size_t offset) {
+    u32 value;
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    return value;
+}
+
+/// The step trace at each present's reply (SetPresentReplyTrace) while it runs.
+void TracePresent(u64 present) {
+    namespace TC = FileSys::OotTimeControl;
+    std::scoped_lock lock{g_trace.mutex};
+    if (g_trace.memory == nullptr || !g_trace.trace.Armed()) {
+        return;
+    }
+    std::array<u8, TC::TraceSize> area{};
+    if (ReadGuestMemory(*g_trace.memory, g_trace.address, area)) {
+        g_trace.error = "the trace area is no longer mapped";
+    } else if (g_trace.trace.Add(present, area)) {
+        return;
+    }
+    g_trace.trace.Stop();
+    SetPresentReplyTrace(nullptr);
+    if (g_trace.error.empty()) {
+        g_trace.memory->Write32(g_trace.address, TC::TraceOffMagic); // done: the routine stops tracing
+    }
+    g_trace.memory = nullptr;
+}
+
+/// Ends a trace's host side without touching guest memory (the session ends; the game may be gone).
+void StopTraceHook() {
+    std::scoped_lock lock{g_trace.mutex};
+    SetPresentReplyTrace(nullptr);
+    g_trace.trace.Stop();
+    g_trace.memory = nullptr;
+}
+
 struct TrainerState {
     System& system;
     RunState run;
     std::function<bool()> stopping;
     CaptureStart capture;
+
+    ~TrainerState() {
+        StopTraceHook();
+    }
 };
 
 /// After a pause, the GPU may still finish the frames queued before it. A capture requested
@@ -255,12 +308,59 @@ json Describe(const Block& block) {
     return result;
 }
 
+/// Arms (presents > 0) or stops (0) the step trace at the guest trace area. A stop keeps the
+/// trace's results for the next reads. Refuses an area the game seems to use: one that is not
+/// zero and has neither trace magic.
+void StepTraceControl(Memory::Memory& memory, u64 area_address, u64 presents) {
+    namespace TC = FileSys::OotTimeControl;
+    if (presents != 0 && !Common::KitStall::HooksEnabled()) {
+        throw std::runtime_error{"the step trace needs the kit's present hook, which "
+                                 "EDEN_NX2_KIT_HOOKS=0 turned off"};
+    }
+    std::array<u8, TC::TraceSize> area{};
+    if (ReadGuestMemory(memory, area_address, area)) {
+        throw std::runtime_error{fmt::format("the trace area at {:#x} is not mapped", area_address)};
+    }
+    const u32 magic = Load32(area, 0);
+    if (magic != TC::TraceMagic && magic != TC::TraceOffMagic &&
+        std::ranges::any_of(area, [](u8 byte) { return byte != 0; })) {
+        throw std::runtime_error{fmt::format(
+            "the trace area at {:#x} is not zero and has no trace magic: the game uses it", area_address)};
+    }
+    std::scoped_lock lock{g_trace.mutex};
+    if (presents == 0) {
+        SetPresentReplyTrace(nullptr);
+        g_trace.trace.Stop();
+        g_trace.memory = nullptr;
+        memory.Write32(area_address, TC::TraceOffMagic);
+        return;
+    }
+    g_trace.trace.Arm(Load32(area, 4), presents);
+    g_trace.error.clear();
+    g_trace.memory = &memory;
+    g_trace.address = area_address;
+    SetPresentReplyTrace(TracePresent);
+    memory.Write32(area_address, TC::TraceMagic); // last: the routine traces from its next call
+}
+
 // Sets how the game's step is changed each frame (OotTimeControl): "off", "scale" (step * value)
-// or "fixed" (value). Without mode it only reports.
+// or "fixed" (value). Without mode it only reports. trace: N traces the routine's calls for N
+// presents (0 stops), trace_read returns the trace with its first records.
 json TimeControl(TrainerState& state, const json& params, const ClientGone&) {
     namespace TC = FileSys::OotTimeControl;
     std::optional<TC::Mode> mode;
     float value = 0.0f;
+    std::optional<u64> trace;
+    if (params.contains("trace")) {
+        const json& given = params.at("trace");
+        if (!given.is_number_integer() || given.get<s64>() < 0 ||
+            given.get<u64>() > MAX_TRACE_PRESENTS) {
+            throw std::runtime_error{
+                fmt::format("trace is the presents to trace, 1 to {}, or 0 to stop", MAX_TRACE_PRESENTS)};
+        }
+        trace = given.get<u64>();
+    }
+    const bool trace_read = params.value("trace_read", false);
     if (params.contains("mode")) {
         const std::string name = params.at("mode").get<std::string>();
         if (name == "off") {
@@ -303,13 +403,24 @@ json TimeControl(TrainerState& state, const json& params, const ClientGone&) {
     json result = {{"address", fmt::format("{:#x}", address)}, {"previous", Describe(previous)}};
     if (!mode) {
         result.update(Describe(previous));
-        return result;
+    } else {
+        // The value first: the routine reads the mode, then the value, at its next call.
+        memory.Write32(address + offsetof(Block, value), std::bit_cast<u32>(value));
+        memory.Write32(address + offsetof(Block, mode), static_cast<u32>(*mode));
+        memory.Write32(address + offsetof(Block, magic), TC::Magic);
+        result.update(Describe(ReadBlock(memory, address)));
     }
-    // The value first: the routine reads the mode, then the value, at its next call.
-    memory.Write32(address + offsetof(Block, value), std::bit_cast<u32>(value));
-    memory.Write32(address + offsetof(Block, mode), static_cast<u32>(*mode));
-    memory.Write32(address + offsetof(Block, magic), TC::Magic);
-    result.update(Describe(ReadBlock(memory, address)));
+    if (trace) {
+        StepTraceControl(memory, address + (TC::TraceOffset - TC::BlockOffset), *trace);
+    }
+    std::scoped_lock lock{g_trace.mutex};
+    if (trace || trace_read || g_trace.trace.Armed()) {
+        // Records only when asked or at the stop: the panel's report polls must stay small.
+        result["trace"] = g_trace.trace.Summary(trace_read || trace == u64{0});
+        if (!g_trace.error.empty()) {
+            result["trace"]["error"] = g_trace.error;
+        }
+    }
     return result;
 }
 
@@ -346,6 +457,89 @@ json Switches(TrainerState&, const json& params, const ClientGone&) {
 }
 
 } // Anonymous namespace
+
+void StepTrace::Field::Add(float value) {
+    if (std::isnan(value)) {
+        ++nan;
+        return;
+    }
+    min = seen ? (std::min)(min, value) : value;
+    max = seen ? (std::max)(max, value) : value;
+    seen = true;
+    if (distinct.size() < MaxDistinct || distinct.contains(value)) {
+        distinct.insert(value);
+    } else {
+        more = true;
+    }
+}
+
+void StepTrace::Arm(u32 count, u64 presents_wanted) {
+    *this = StepTrace{};
+    armed = true;
+    next = count + 1;
+    wanted = presents_wanted;
+}
+
+bool StepTrace::Add(u64 present, std::span<const u8> area) {
+    namespace TC = FileSys::OotTimeControl;
+    if (!armed || area.size() < TC::TraceSize) {
+        return false;
+    }
+    const u32 count = Load32(area, 4);
+    // Calls since the last present. The newest record slot can be in the middle of the next
+    // call's first write, so at most TraceRecords - 1 are read; the rest are counted as dropped.
+    const s32 fresh_signed = static_cast<s32>(count - next);
+    const u32 fresh = fresh_signed > 0 ? static_cast<u32>(fresh_signed) : 0;
+    const u32 readable = (std::min<u32>)(fresh, TC::TraceRecords - 1);
+    dropped += fresh - readable;
+    for (u32 call = count - readable; call != count; ++call) {
+        const size_t at = 16 + (call % TC::TraceRecords) * TC::TraceRecordSize;
+        std::array<float, 4> values;
+        for (size_t i = 0; i < values.size(); ++i) {
+            values[i] = std::bit_cast<float>(Load32(area, at + 4 * i));
+            fields[i].Add(values[i]);
+        }
+        if (kept.size() < KeptRecords) {
+            kept.emplace_back(present, values);
+        }
+        ++calls;
+    }
+    if (fresh_signed > 0) {
+        next = count;
+    }
+    first_present = presents == 0 ? present : first_present;
+    last_present = present;
+    ++per_present[fresh];
+    return ++presents < wanted;
+}
+
+json StepTrace::Summary(bool records) const {
+    json per = json::object();
+    for (const auto& [n, count] : per_present) {
+        per[std::to_string(n)] = count;
+    }
+    json result = {{"armed", armed},       {"presents", presents},   {"wanted", wanted},
+                   {"calls", calls},       {"dropped", dropped},     {"first_present", first_present},
+                   {"last_present", last_present}, {"calls_per_present", std::move(per)}};
+    static constexpr std::array<const char*, 4> NAMES{"s1", "s0", "own_step", "step"};
+    for (size_t i = 0; i < NAMES.size(); ++i) {
+        json field = {{"distinct", std::vector<float>(fields[i].distinct.begin(), fields[i].distinct.end())},
+                      {"more_distinct", fields[i].more}, {"nan", fields[i].nan}};
+        if (fields[i].seen) {
+            field["min"] = fields[i].min;
+            field["max"] = fields[i].max;
+        }
+        result[NAMES[i]] = std::move(field);
+    }
+    if (records) {
+        json list = json::array();
+        for (const auto& [present, values] : kept) {
+            list.push_back({present, values[0], values[1], values[2], values[3]});
+        }
+        result["records"] = std::move(list);
+    }
+    return result;
+}
 
 void SetRunControl(RunControl control) {
     std::scoped_lock lock{g_control_mutex};

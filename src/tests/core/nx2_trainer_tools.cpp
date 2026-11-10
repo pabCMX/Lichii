@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <atomic>
+#include <cstring>
 #include <optional>
 #include <mutex>
 #include <condition_variable>
@@ -282,10 +284,64 @@ TEST_CASE("time_control checks its mode and value and needs the patch", "[nx2_tr
     REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", "1"}}),
                         ContainsSubstring("fixed value must be"));
     REQUIRE_THROWS(call({{"mode", "scale"}}));
+    REQUIRE_THROWS_WITH(call({{"trace", -1}}), ContainsSubstring("trace is the presents to trace, 1 to 36000"));
+    REQUIRE_THROWS_WITH(call({{"trace", 36001}}), ContainsSubstring("1 to 36000"));
+    REQUIRE_THROWS_WITH(call({{"trace", 2.5}}), ContainsSubstring("or 0 to stop"));
     // The first Publish takes what an earlier Apply in this process left pending, the second clears.
     FileSys::OotTimeControl::Publish("main", 0);
     FileSys::OotTimeControl::Publish("main", 0);
     REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 0.5}}),
                         ContainsSubstring("EDEN_NX2_OOT_TIME_CONTROL=1"));
     REQUIRE_THROWS_WITH(call(json::object()), ContainsSubstring("not installed"));
+}
+
+namespace {
+
+/// A guest trace area: magic, count, then the record of call i at slot i % 8.
+struct TraceArea {
+    std::array<u8, FileSys::OotTimeControl::TraceSize> bytes{};
+    u32 count{};
+
+    void Call(float s1, float s0, float own, float step) {
+        const std::array<float, 4> values{s1, s0, own, step};
+        std::memcpy(bytes.data() + 16 + (count % 8) * 16, values.data(), sizeof(values));
+        ++count;
+        std::memcpy(bytes.data() + 4, &count, sizeof(count));
+    }
+};
+
+} // Anonymous namespace
+
+TEST_CASE("The step trace stamps calls with their present and sums them up", "[nx2_trainer]") {
+    using Core::Nx2Debug::StepTrace;
+    TraceArea area;
+    area.Call(60, 60, 1, 1); // before the arm
+    StepTrace trace;
+    trace.Arm(area.count, 4);
+    area.Call(9, 9, 9, 9); // in progress at the arm: skipped
+    area.Call(60, 60, 1, 1);
+    area.Call(30, 60, 0.5f, 0.5f);
+    REQUIRE(trace.Add(100, area.bytes));
+    REQUIRE(trace.Add(101, area.bytes)); // a present without a call (a load)
+    for (int i = 0; i < 10; ++i) {
+        area.Call(60, 59.5f + 0.5f * (i % 2), 1, 1); // ten calls in one present: three dropped
+    }
+    REQUIRE(trace.Add(102, area.bytes));
+    area.Call(30, 60, 0.5f, 0.25f);
+    REQUIRE_FALSE(trace.Add(103, area.bytes)); // the fourth present: done
+    const json summary = trace.Summary(true);
+    REQUIRE(summary["presents"] == 4);
+    REQUIRE(summary["calls"] == 10);
+    REQUIRE(summary["dropped"] == 3);
+    REQUIRE(summary["first_present"] == 100);
+    REQUIRE(summary["last_present"] == 103);
+    REQUIRE(summary["calls_per_present"] == json{{"0", 1}, {"1", 1}, {"2", 1}, {"10", 1}});
+    REQUIRE(summary["s0"]["distinct"] == json{59.5f, 60.0f});
+    REQUIRE(summary["s1"]["min"] == 30.0f);
+    REQUIRE(summary["step"]["distinct"] == json{0.25f, 0.5f, 1.0f});
+    REQUIRE(summary["own_step"]["distinct"] == json{0.5f, 1.0f});
+    REQUIRE(summary["records"].size() == 10);
+    REQUIRE(summary["records"][0] == json{100, 60.0f, 60.0f, 1.0f, 1.0f});
+    REQUIRE(summary["records"][9] == json{103, 30.0f, 60.0f, 0.5f, 0.25f});
+    REQUIRE_FALSE(trace.Summary(false).contains("records"));
 }
