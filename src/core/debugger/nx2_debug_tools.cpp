@@ -1178,6 +1178,9 @@ struct Recorder {
         HID::InjectedInput input;
         std::optional<HID::InjectedInput> reply_input;
         std::chrono::steady_clock::time_point counted;
+        /// npad_sync: the npad update at this reply runs now; synced is what it wrote.
+        bool sync_pending{};
+        std::optional<HID::InjectedInput> synced;
     };
     std::optional<OpenCount> open;
     /// Mode "any": the same presents with the sticks of the count's start, the phase before
@@ -1208,8 +1211,14 @@ std::array<HID::EmulatedController*, 2> RecordedControllers(ToolState& state) {
 /// Adds what controller gives the game now to input: the two getters the npad updater reads,
 /// limited to the buttons an input step can hold. Buttons are ORed; each stick keeps the larger
 /// deflection.
+void AddGameInput(HID::InjectedInput& input, HID::NpadButton held, const HID::AnalogSticks& sticks);
+
 void AddGameInput(HID::InjectedInput& input, const HID::EmulatedController& controller) {
-    const HID::NpadButton held = controller.GetNpadButtons().raw;
+    AddGameInput(input, controller.GetNpadButtons().raw, controller.GetSticks());
+}
+
+/// Adds the buttons and sticks of one controller read to input.
+void AddGameInput(HID::InjectedInput& input, HID::NpadButton held, const HID::AnalogSticks& sticks) {
     for (const auto& [name, button] : INPUT_BUTTONS) {
         input.buttons |= held & button;
     }
@@ -1222,7 +1231,6 @@ void AddGameInput(HID::InjectedInput& input, const HID::EmulatedController& cont
             kept = stick;
         }
     };
-    const HID::AnalogSticks sticks = controller.GetSticks();
     keep_larger(input.left, sticks.left);
     keep_larger(input.right, sticks.right);
 }
@@ -1304,7 +1312,9 @@ void RecordPresent(u64 present) {
         recorder.open = Recorder::OpenCount{.present = present,
                                             .input = input,
                                             .reply_input = std::nullopt,
-                                            .counted = counted};
+                                            .counted = counted,
+                                            .sync_pending = false,
+                                            .synced = std::nullopt};
     }
 }
 
@@ -1323,7 +1333,11 @@ void RecordPresentReply(u64 present) {
     recorder.blocked_sum_us += blocked_us;
     recorder.blocked_max_us = (std::max)(recorder.blocked_max_us, blocked_us);
     ++recorder.blocked_presents;
-    HID::InjectedInput input = GameInput(recorder.sources);
+    // With npad_sync, exactly the entry the update wrote; otherwise the getters now.
+    HID::InjectedInput input =
+        recorder.open->synced ? *recorder.open->synced : GameInput(recorder.sources);
+    recorder.open->sync_pending = false;
+    recorder.open->synced.reset();
     recorder.open->input.buttons |= input.buttons;
     recorder.open->reply_input = input;
 }
@@ -1331,7 +1345,8 @@ void RecordPresentReply(u64 present) {
 /// HID::g_npad_read_hook in mode "any": ORs the buttons the npad updater reads for the game into
 /// the open count. A read that may belong to another count (the count moved around it) is left
 /// out, so scripted input of the next count never leaks into this one.
-void RecordNpadRead(const HID::EmulatedController& controller) {
+void RecordNpadRead(const HID::EmulatedController& controller, HID::NpadButton held,
+                    const HID::AnalogSticks& sticks) {
     Recorder& recorder = GetRecorder();
     KitLock lock{recorder.mutex, "recorder mutex", __func__};
     if (!recorder.open || std::ranges::find(recorder.sources, &controller) == recorder.sources.end()) {
@@ -1340,6 +1355,13 @@ void RecordNpadRead(const HID::EmulatedController& controller) {
     const u64 before = g_nx2_present_count.load(std::memory_order_acquire);
     if (before != recorder.open->present) {
         return;
+    }
+    if (recorder.open->sync_pending) {
+        // The update at this present's reply: keep the values it wrote for the game.
+        if (!recorder.open->synced) {
+            recorder.open->synced = HID::InjectedInput{};
+        }
+        AddGameInput(*recorder.open->synced, held, sticks);
     }
     HID::InjectedInput input{};
     AddGameInput(input, controller);
@@ -1352,15 +1374,21 @@ void RecordNpadRead(const HID::EmulatedController& controller) {
 bool RecordingWantsSync(u64 present) {
     Recorder& recorder = GetRecorder();
     KitLock lock{recorder.mutex, "recorder mutex", __func__};
-    return recorder.npad_sync && recorder.open && recorder.open->present == present;
+    if (!recorder.npad_sync || !recorder.open || recorder.open->present != present) {
+        return false;
+    }
+    recorder.open->sync_pending = true;
+    recorder.open->synced.reset();
+    return true;
 }
 
 /// g_nx2_present_reply_hook: the stale check of a replay, then the npad update a replay or a
 /// recording asks for (outside the recorder lock: the update takes the npad lock and then calls
-/// the npad read hook), then the recording's reply sample, which reads the same getters.
+/// the npad read hook, which keeps what it wrote), then the recording's reply sample.
 void PresentReply(u64 present) {
     const bool replay_sync = NoteReplayReply(present);
-    if (replay_sync || RecordingWantsSync(present)) {
+    const bool record_sync = RecordingWantsSync(present);
+    if (replay_sync || record_sync) {
         static_cast<void>(::Service::HID::UpdateNpadNow());
     }
     RecordPresentReply(present);

@@ -448,7 +448,7 @@ void NPad::RequestPadStateUpdate(Kernel::KernelCore& kernel, u64 aruid, Core::HI
     const auto button_state = controller.device->GetNpadButtons();
     const auto stick_state = controller.device->GetSticks();
     if (const auto hook = Core::HID::g_npad_read_hook.load(std::memory_order_acquire)) {
-        hook(*controller.device);
+        hook(*controller.device, button_state.raw, stick_state);
     }
 
     using btn = Core::HID::NpadButton;

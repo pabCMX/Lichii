@@ -430,9 +430,10 @@ present c (`g_nx2_present_reply_hook`). When the time from count to reply is sho
 wait for the next update, the newest entry still holds step c - 1, and the game gets the old
 input for one more frame. With the stamps on (only while a frame-step call or a recording in mode
 `"any"` runs), `ResourceManager::UpdateNpad` stores the host time of each update's start
-(`HID::g_npad_update_ns`). The reply hook compares it with the present's count time in
-`g_nx2_present_times_ns`. An update that began just before the count but read after it is
-counted as stale too, so the list is an upper bound.
+(`HID::g_npad_update_ns`) once its entries are written, so an update still running counts as not
+done. The reply hook compares it with the present's count time in `g_nx2_present_times_ns`. An
+update that began just before the count but read after it is counted as stale too, so the list is
+an upper bound.
 
 **`npad_sync`** (default true, any frame-step `input` or `input_sequence`) removes that race:
 at the reply of each covered present, the reply hook runs one npad update itself
@@ -532,8 +533,8 @@ the reply value is what a game that reads input at the start of its frame gets. 
 deflection would turn a short flick into a whole present at full tilt, and the last read of the
 count is late by almost a whole frame of game logic.
 
-With `npad_sync` the recorder's reply sample is taken right after that npad update, so a step
-holds exactly the newest entry the game read next, and a replay with `npad_sync` gives the game
+With `npad_sync` the recorder's reply sample is the values that npad update wrote (the npad read
+hook passes them), so a step holds exactly the newest entry the game read next, and a replay with `npad_sync` gives the game
 the same entry: record and replay describe the same thing. A recording with `npad_sync: false`
 (and every recording made before kit 2) can differ from what the game read by up to 1 ms of
 input plus the timer thread's lateness.

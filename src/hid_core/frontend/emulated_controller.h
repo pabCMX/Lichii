@@ -97,7 +97,9 @@ using InputInjector = std::function<std::optional<InjectedInput>()>;
 class EmulatedController;
 /// Called by the npad updater for each controller it reads for the game, while set. Only the
 /// debug server's input_record sets it.
-extern std::atomic<void (*)(const EmulatedController&)> g_npad_read_hook;
+/// It gets the buttons and sticks the update read for the game.
+extern std::atomic<void (*)(const EmulatedController&, NpadButton, const AnalogSticks&)>
+    g_npad_read_hook;
 
 struct ControllerColors {
     NpadControllerColor fullkey{};

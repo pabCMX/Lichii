@@ -581,7 +581,7 @@ public:
         : thread{[this, &controller] {
               while (!stop) {
                   if (const auto hook = Core::HID::g_npad_read_hook.load()) {
-                      hook(controller);
+                      hook(controller, controller.GetNpadButtons().raw, controller.GetSticks());
                   }
                   std::this_thread::sleep_for(300us);
               }
@@ -956,7 +956,7 @@ TEST_CASE("Input recordings hold presses shorter than a present unless the mode 
             for (size_t index = 1; index < reads.size(); ++index) {
                 pressed = reads[index];
                 if (const auto hook = Core::HID::g_npad_read_hook.load()) {
-                    hook(controller);
+                    hook(controller, controller.GetNpadButtons().raw, controller.GetSticks());
                 }
             }
         }
