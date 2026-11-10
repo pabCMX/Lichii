@@ -4,9 +4,12 @@
 #include <bit>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "common/common_funcs.h"
 #include "core/file_sys/oot_time_control.h"
 #include "core/loader/nso.h"
@@ -112,42 +115,62 @@ public:
     }
 };
 
-/// The step the game gets (s8) after the hook, for s1 / s0 = 60 / 30. Checks that every register
-/// the routine may not touch is unchanged.
-float RunHook(const std::vector<u8>& patched, std::optional<TC::Mode> mode = std::nullopt,
-              float value = 0.0f, u32 magic = TC::Magic) {
-    StepEnvironment env;
-    env.Load(patched, TC::HookOffset, 4);
-    env.Load(patched, AddonOffset, 0x100 + 96);
-    env.Write32(StepEnvironment::Base + TC::HookOffset + 4, 0xD4000001); // svc #0
-    if (mode) {
+/// The patched hook in one dynarmic JIT, run again and again as the game calls it each frame,
+/// with the control block changed between runs as time_control changes it while the game runs.
+class Hook {
+public:
+    explicit Hook(const std::vector<u8>& patched) {
+        env.Load(patched, TC::HookOffset, 4);
+        env.Load(patched, AddonOffset, 0x100 + 108);
+        env.Write32(StepEnvironment::Base + TC::HookOffset + 4, 0xD4000001); // svc #0
+        Dynarmic::A64::UserConfig config;
+        config.callbacks = &env;
+        config.enable_cycle_counting = false;
+        jit = std::make_unique<Dynarmic::A64::Jit>(config);
+        env.jit = jit.get();
+    }
+
+    void Set(std::optional<TC::Mode> mode, float value = 0.0f, u32 magic = TC::Magic) {
         const u64 block = StepEnvironment::Base + TC::BlockOffset;
-        env.Write32(block, magic);
-        env.Write32(block + 4, static_cast<u32>(*mode));
+        env.Write32(block, mode ? magic : 0);
+        env.Write32(block + 4, mode ? static_cast<u32>(*mode) : 0);
         env.Write32(block + 8, std::bit_cast<u32>(value));
     }
-    Dynarmic::A64::UserConfig config;
-    config.callbacks = &env;
-    config.enable_cycle_counting = false;
-    Dynarmic::A64::Jit jit{config};
-    env.jit = &jit;
-    for (size_t i = 0; i < 31; ++i) {
-        jit.SetRegister(i, 0x12340000 + i);
-    }
-    jit.SetVector(0, {std::bit_cast<u32>(30.0f), 0});
-    jit.SetVector(1, {std::bit_cast<u32>(60.0f), 0});
-    jit.SetSP(StepEnvironment::Stack);
-    jit.SetPC(StepEnvironment::Base + TC::HookOffset);
-    jit.Run();
-    REQUIRE(jit.GetPC() == StepEnvironment::Base + TC::HookOffset + 8);
-    REQUIRE(jit.GetSP() == StepEnvironment::Stack);
-    REQUIRE(jit.GetRegister(30) == StepEnvironment::Base + TC::HookOffset + 4);
-    for (size_t i = 0; i < 30; ++i) {
-        if (i < 10 || i > 12) {
-            REQUIRE(jit.GetRegister(i) == 0x12340000 + i);
+
+    /// The step the game gets (s8) for its s1 / s0. Checks that every register the routine may not
+    /// touch is unchanged, s1 included.
+    float Run(float s1 = 60.0f, float s0 = 30.0f) {
+        for (size_t i = 0; i < 31; ++i) {
+            jit->SetRegister(i, 0x12340000 + i);
         }
+        jit->SetVector(0, {std::bit_cast<u32>(s0), 0});
+        jit->SetVector(1, {std::bit_cast<u32>(s1), 0});
+        jit->SetSP(StepEnvironment::Stack);
+        jit->SetPC(StepEnvironment::Base + TC::HookOffset);
+        jit->Run();
+        REQUIRE(jit->GetPC() == StepEnvironment::Base + TC::HookOffset + 8);
+        REQUIRE(jit->GetSP() == StepEnvironment::Stack);
+        REQUIRE(jit->GetRegister(30) == StepEnvironment::Base + TC::HookOffset + 4);
+        for (size_t i = 0; i < 30; ++i) {
+            if (i < 10 || i > 12) {
+                REQUIRE(jit->GetRegister(i) == 0x12340000 + i);
+            }
+        }
+        REQUIRE(std::bit_cast<float>(static_cast<u32>(jit->GetVector(1)[0])) == s1);
+        return std::bit_cast<float>(static_cast<u32>(jit->GetVector(8)[0]));
     }
-    return std::bit_cast<float>(static_cast<u32>(jit.GetVector(8)[0]));
+
+private:
+    StepEnvironment env;
+    std::unique_ptr<Dynarmic::A64::Jit> jit;
+};
+
+/// One run of the hook for s1 / s0 = 60 / 30.
+float RunHook(const std::vector<u8>& patched, std::optional<TC::Mode> mode = std::nullopt,
+              float value = 0.0f, u32 magic = TC::Magic) {
+    Hook hook{patched};
+    hook.Set(mode, value, magic);
+    return hook.Run();
 }
 
 } // Anonymous namespace
@@ -175,7 +198,7 @@ TEST_CASE("Time control installs around the game's step or the add-on's", "[oot_
         REQUIRE(Apply(nso, out));
         REQUIRE(WordAt(out, TC::HookOffset) == RoutineCall);
         REQUIRE(WordAt(out, TC::RoutineOffset) == 0x18FFF80B);
-        REQUIRE(WordAt(out, TC::RoutineOffset + 92) == TC::Magic);
+        REQUIRE(WordAt(out, TC::RoutineOffset + 100) == TC::Magic);
         REQUIRE(WordAt(out, TC::BlockOffset) == 0);
         TC::Publish("sdk", 0x9000000);
         TC::Publish("main", 0x8000000);
@@ -236,9 +259,71 @@ TEST_CASE("Time control routine scales or replaces the step, and only with its m
     REQUIRE(RunHook(addon) == 0.5f);
     REQUIRE(RunHook(plain, TC::Mode::Scale, 0.25f) == 0.5f);
     REQUIRE(RunHook(addon, TC::Mode::Scale, 3.0f) == 1.5f);
-    REQUIRE(RunHook(plain, TC::Mode::Fixed, 0.0f) == 0.0f);
-    REQUIRE(RunHook(addon, TC::Mode::Fixed, 1.0f) == 1.0f);
     REQUIRE(RunHook(plain, TC::Mode::Off, 3.0f) == 2.0f);
     REQUIRE(RunHook(plain, static_cast<TC::Mode>(3), 3.0f) == 2.0f);
     REQUIRE(RunHook(plain, TC::Mode::Fixed, 1.0f, 0) == 2.0f);
+}
+
+TEST_CASE("Time control fixed gives every caller the same game time in its own unit",
+          "[oot_time_control]") {
+    // The step is in ticks of s1 Hz (s1 / s0 originally). A fixed step that ignores s1 runs a
+    // 30 Hz caller and a 60 Hz caller at different relative speeds: the live D3 failure.
+    const auto nso = MakeMain();
+    auto plain = nso;
+    REQUIRE(Apply(nso, plain));
+    auto addon = nso;
+    SetWord(addon, AddonOffset, 0x1E2C1008); // the add-on's step: 0.5
+    SetWord(addon, AddonOffset + 4, 0xD65F03C0);
+    SetWord(addon, TC::HookOffset, AddonCall);
+    REQUIRE(Apply(nso, addon));
+    for (const auto* patched : {&plain, &addon}) {
+        Hook hook{*patched};
+        hook.Set(TC::Mode::Fixed, 1.0f);
+        REQUIRE_THAT(hook.Run(60.0f, 60.0f), Catch::Matchers::WithinRel(1.0f, 1e-6f));
+        REQUIRE_THAT(hook.Run(30.0f, 60.0f), Catch::Matchers::WithinRel(0.5f, 1e-6f));
+        hook.Set(TC::Mode::Fixed, 0.5f);
+        // Half the game time per frame for both: the 60 Hz and 30 Hz callers keep their 2:1 ratio.
+        REQUIRE_THAT(hook.Run(60.0f, 60.0f) / hook.Run(30.0f, 60.0f), Catch::Matchers::WithinRel(2.0f, 1e-6f));
+    }
+}
+
+TEST_CASE("Time control fixed whole steps match FPS Unlock at 60, 30, 20 and 10 FPS",
+          "[oot_time_control]") {
+    // FPS Unlock returns seconds per frame * s1, so at F FPS a caller gets s1 / F. fixed N must give
+    // every caller that step at F = 60 / N: the steps the game already takes in real play.
+    const auto nso = MakeMain();
+    auto plain = nso;
+    REQUIRE(Apply(nso, plain));
+    Hook hook{plain};
+    for (const auto [n, fps] : {std::pair{1.0f, 60.0f}, {2.0f, 30.0f}, {3.0f, 20.0f}, {6.0f, 10.0f}}) {
+        hook.Set(TC::Mode::Fixed, n);
+        for (const float s1 : {60.0f, 30.0f}) {
+            REQUIRE_THAT(hook.Run(s1, 60.0f), Catch::Matchers::WithinRel(s1 / fps, 1e-6f));
+        }
+    }
+}
+
+TEST_CASE("Time control mode changes on a running hook return to the game's step",
+          "[oot_time_control]") {
+    const auto nso = MakeMain();
+    auto plain = nso;
+    REQUIRE(Apply(nso, plain));
+    Hook hook{plain};
+    // The game's own step with the add-ons off: s1 / s0 for each caller.
+    const auto own = [&] {
+        REQUIRE(hook.Run(60.0f, 60.0f) == 1.0f);
+        REQUIRE(hook.Run(30.0f, 60.0f) == 0.5f);
+    };
+    hook.Set(std::nullopt);
+    own();
+    hook.Set(TC::Mode::Fixed, 0.01f);
+    REQUIRE_THAT(hook.Run(60.0f, 60.0f), Catch::Matchers::WithinRel(0.01f, 1e-5f));
+    hook.Set(TC::Mode::Off);
+    own();
+    hook.Set(TC::Mode::Scale, 0.01f);
+    REQUIRE_THAT(hook.Run(30.0f, 60.0f), Catch::Matchers::WithinRel(0.005f, 1e-5f));
+    hook.Set(TC::Mode::Fixed, 6.0f);
+    REQUIRE_THAT(hook.Run(30.0f, 60.0f), Catch::Matchers::WithinRel(3.0f, 1e-6f));
+    hook.Set(TC::Mode::Off, 6.0f);
+    own();
 }

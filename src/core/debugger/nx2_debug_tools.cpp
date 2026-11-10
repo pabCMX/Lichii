@@ -412,6 +412,10 @@ Png CaptureScreenshot(System& system, u32 height, std::chrono::seconds timeout,
 namespace {
 
 json Screenshot(ToolState& state, const json& params) {
+    if (state.system.IsPaused()) {
+        // A request now would stay pending until the next present and block later screenshots.
+        throw std::runtime_error{"paused: a screenshot needs a present; use step_frames or resume"};
+    }
     const Png shot = CaptureScreenshot(
         state.system, Param<u32>(params, "height", 720, 144, 2160),
         std::chrono::seconds{Param<int>(params, "timeout_s", 5, 1, 30)}, state.stopping);
@@ -474,7 +478,12 @@ json LogFilter(ToolState& state, const json& params) {
     return result;
 }
 
-json CaptureFrame(ToolState& state, const json& params) {
+json FinishCapture(u64 id, const std::filesystem::path& directory, bool sampled, bool buffers, int timeout,
+                   size_t keep);
+
+/// Requests a capture of the next frame the GPU finishes and returns the wait for it, which
+/// answers as capture_frame does. step_frames {capture} requests it while the game is paused.
+std::function<json(bool cancel)> StartCapture(ToolState& state, const json& params) {
     if (!IsVulkan()) {
         throw std::runtime_error{"frame capture needs the Vulkan renderer"};
     }
@@ -484,8 +493,28 @@ json CaptureFrame(ToolState& state, const json& params) {
     const bool sampled = params.value("sampled", false);
     const bool buffers = params.value("buffers", false);
     const int timeout = Param<int>(params, "timeout_s", 120, 1, 600);
+    const size_t keep = Param<size_t>(params, "manifest_lines", 200, 0, 5000);
     VideoCore::Nx2Debug::RequestCapture(
         {.id = id, .directory = directory, .sampled = sampled, .buffers = buffers});
+    return [id, directory, sampled, buffers, timeout, keep](bool cancel) -> json {
+        if (cancel) {
+            VideoCore::Nx2Debug::CancelCapture(id);
+            return {};
+        }
+        return FinishCapture(id, directory, sampled, buffers, timeout, keep);
+    };
+}
+
+json CaptureFrame(ToolState& state, const json& params) {
+    if (state.system.IsPaused()) {
+        throw std::runtime_error{"paused: a capture needs a present; use step_frames {frames: 1, "
+                                 "capture: true} for the next frame, or resume"};
+    }
+    return StartCapture(state, params)(false);
+}
+
+json FinishCapture(u64 id, const std::filesystem::path& directory, bool sampled, bool buffers, int timeout,
+                   size_t keep) {
     const auto finished = VideoCore::Nx2Debug::WaitCapture(id, std::chrono::seconds{timeout});
     if (!finished) {
         VideoCore::Nx2Debug::CancelCapture(id);
@@ -497,7 +526,6 @@ json CaptureFrame(ToolState& state, const json& params) {
     if (!finished->error.empty()) {
         throw std::runtime_error{finished->error};
     }
-    const size_t keep = Param<size_t>(params, "manifest_lines", 200, 0, 5000);
     json entries = json::array();
     json kinds = json::object();
     json frame;
@@ -1639,7 +1667,8 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"luma_watch", waiting(LumaWatch)},
     };
     AddTrainerHandlers(handlers, state->system,
-                       [state] { return state->stopping.load(std::memory_order_relaxed); });
+                       [state] { return state->stopping.load(std::memory_order_relaxed); },
+                       [state](const json& params) { return StartCapture(*state, params); });
     return handlers;
 }
 
