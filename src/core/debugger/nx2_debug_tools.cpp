@@ -35,6 +35,7 @@
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "core/debugger/nx2_trainer_tools.h"
+#include "core/file_sys/oot_time_control.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
@@ -1636,19 +1637,28 @@ json LumaWatch(ToolState& state, const json& params, const ClientGone& client_go
 /// What this build's debug server supports beyond origin, so a client can tell an older exe,
 /// which ignores unknown parameters, apart. Raise kit when the kit's contract changes.
 /// The trainer methods (docs/nx2/trainer-kit.md) are listed too; time_trace (time_control
-/// {trace}) uses the present hook, so EDEN_NX2_KIT_HOOKS=0 leaves it out.
+/// {trace}) uses the present hook, so EDEN_NX2_KIT_HOOKS=0 leaves it out. time_control_block is
+/// the guest address of Ocarina's time control block, only while it is installed (a boot with
+/// EDEN_NX2_OOT_TIME_CONTROL=1), so a tool can read the block before any time_control call.
 json Features(ToolState&, const json&) {
+    json result;
     if (!Common::KitStall::HooksEnabled()) {
-        return {{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches"}},
-                {"kit", 2},
-                {"kit_hooks", false}};
+        result = {{"features",
+                   {"input_ms", "measure", "pause", "step_frames", "time_control", "switches"}},
+                  {"kit", 2},
+                  {"kit_hooks", false}};
+    } else {
+        result = {{"features",
+                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
+                    "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
+                    "step_frames", "time_control", "time_trace", "switches"}},
+                  {"kit", 2},
+                  {"kit_hooks", true}};
     }
-    return {{"features",
-             {"input_ms", "measure", "input_record", "record_mode", "start_present",
-              "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
-              "step_frames", "time_control", "time_trace", "switches"}},
-            {"kit", 2},
-            {"kit_hooks", true}};
+    if (const u64 block = FileSys::OotTimeControl::BlockAddress(); block != 0) {
+        result["time_control_block"] = fmt::format("{:#x}", block);
+    }
+    return result;
 }
 
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {

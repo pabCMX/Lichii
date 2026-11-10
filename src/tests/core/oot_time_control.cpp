@@ -12,9 +12,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "common/common_funcs.h"
+#include "core/core.h"
+#include "core/debugger/nx2_debug_tools.h"
 #include "core/file_sys/oot_time_control.h"
 #include "core/loader/nso.h"
 #include "dynarmic/interface/A64/a64.h"
+#include "tests/core/system_test_context.h"
 
 namespace {
 
@@ -225,6 +228,26 @@ TEST_CASE("Time control installs around the game's step or the add-on's", "[oot_
         TC::Publish("main", 0x8000000);
         REQUIRE(TC::BlockAddress() == 0);
     }
+}
+
+TEST_CASE("features gives the control block address only while time control is installed",
+          "[oot_time_control]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    const auto features = [&] {
+        return Core::Nx2Debug::CallTool(system, "features", nlohmann::json::object());
+    };
+    // Two Publish calls clear whatever an earlier Apply in this process left pending.
+    TC::Publish("main", 0);
+    TC::Publish("main", 0);
+    REQUIRE_FALSE(features().contains("time_control_block"));
+    const auto nso = MakeMain();
+    auto out = nso;
+    REQUIRE(Apply(nso, out));
+    TC::Publish("main", 0x80747000); // HTPC-B5: "Module main loaded at 0x80747000"
+    REQUIRE(features()["time_control_block"] == "0x855e6f00");
+    TC::Publish("main", 0x80747000); // the next boot without the patch
+    REQUIRE_FALSE(features().contains("time_control_block"));
 }
 
 TEST_CASE("Time control refuses changed bytes and layouts", "[oot_time_control]") {

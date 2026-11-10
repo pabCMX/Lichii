@@ -64,7 +64,15 @@ paused frame.
 
 Without `mode` it only reports. It returns `{address, mode, value?, previous}`, `ramp` when a
 change went up in stages (below), and `trace`
-while a step trace runs or was asked for (see "Step trace").
+while a step trace runs or was asked for (see "Step trace"). A call without `mode` and `trace`
+reads the 16-byte block and writes nothing.
+
+The block's address is also in `features`, as `time_control_block` (for example `"0x855e6f00"`),
+while time control is installed: from the boot with `EDEN_NX2_OOT_TIME_CONTROL=1` on, at the
+title screen too. Without the variable, or before the game loads, the key is not there, so the
+`features` reply is the same as without the kit. The step trace area is at that address + 0x10.
+Until 2026-11-10 the address was only in the disk log ("Module main loaded at" + 0x4e9ff00): the
+debug server's `log_tail` ring starts after the loader lines (HTPC-B5 D9).
 
 Units. The game's step is not a plain time. It is in ticks of `s1` Hz, where `s1` is 30 or 60 and
 differs between callers: the original is `s1 / s0` (`s0` the frame-rate field), and FPS Unlock
@@ -342,7 +350,7 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
 `EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545` and `EDEN_NX2_OOT_TIME_CONTROL=1`:
 
 1. Log: `Applying time control to main (...)` once per boot, and no `Skipping time control`.
-2. Before any `time_control` call, `read_memory {address: <address from time_control>, size: 160}`
+2. Before any `time_control` call, `read_memory {address: <time_control_block from features>, size: 160}`
    at the title screen and after 5 minutes of play: all zero (the block and the step trace after
    it). A non-zero value means the game uses that memory: stop and report.
 3. `pause`: the Qt menu shows paused, `status.paused` is true. `resume`: both clear.
