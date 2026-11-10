@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <charconv>
@@ -889,7 +890,9 @@ json InputSequence(ToolState& state, const json& params, const ClientGone& clien
 /// input_record handler and Service shutdown change it. All of them hold mutex.
 struct Recorder {
     std::mutex mutex;
-    HID::EmulatedController* controller{};
+    /// Player 1 and the handheld controller. Their bindings and connections are separate, and
+    /// the game reads every connected npad, so the owner's pad can drive either.
+    std::array<HID::EmulatedController*, 2> sources{};
     std::string controller_name;
     std::optional<InputRecording> recording;
 };
@@ -899,16 +902,62 @@ Recorder& GetRecorder() {
     return recorder;
 }
 
-/// What the game is given now: the two getters the npad updater reads, limited to the buttons an
-/// input step can hold.
-HID::InjectedInput GameInput(const HID::EmulatedController& controller) {
+std::array<HID::EmulatedController*, 2> RecordedControllers(ToolState& state) {
+    auto& hid = state.system.HIDCore();
+    return {hid.GetEmulatedController(HID::NpadIdType::Player1),
+            hid.GetEmulatedController(HID::NpadIdType::Handheld)};
+}
+
+/// Adds what controller gives the game now to input: the two getters the npad updater reads,
+/// limited to the buttons an input step can hold. Buttons are ORed; each stick keeps the larger
+/// deflection.
+void AddGameInput(HID::InjectedInput& input, const HID::EmulatedController& controller) {
     const HID::NpadButton held = controller.GetNpadButtons().raw;
-    HID::NpadButton buttons{};
     for (const auto& [name, button] : INPUT_BUTTONS) {
-        buttons |= held & button;
+        input.buttons |= held & button;
     }
+    const auto keep_larger = [](std::optional<HID::AnalogStickState>& kept,
+                                const HID::AnalogStickState& stick) {
+        const auto size = [](const HID::AnalogStickState& value) {
+            return s64{value.x} * value.x + s64{value.y} * value.y;
+        };
+        if (!kept || size(stick) > size(*kept)) {
+            kept = stick;
+        }
+    };
     const HID::AnalogSticks sticks = controller.GetSticks();
-    return {.buttons = buttons, .left = sticks.left, .right = sticks.right};
+    keep_larger(input.left, sticks.left);
+    keep_larger(input.right, sticks.right);
+}
+
+/// What the game is given now from the connected recorded controllers.
+HID::InjectedInput GameInput(std::span<HID::EmulatedController* const> controllers) {
+    HID::InjectedInput input{.buttons = {}, .left = HID::AnalogStickState{},
+                             .right = HID::AnalogStickState{}};
+    for (const HID::EmulatedController* const controller : controllers) {
+        if (controller->IsConnected()) {
+            AddGameInput(input, *controller);
+        }
+    }
+    return input;
+}
+
+/// For status: each recorded controller's connection, npad style and whether it gives input now.
+json ControllerStates(std::span<HID::EmulatedController* const> controllers) {
+    json list = json::array();
+    for (const HID::EmulatedController* const controller : controllers) {
+        HID::InjectedInput input{};
+        AddGameInput(input, *controller);
+        const bool active = input.buttons != HID::NpadButton::None || input.left->x != 0 ||
+                            input.left->y != 0 || input.right->x != 0 || input.right->y != 0;
+        list.push_back(
+            {{"npad", controller->GetNpadIdType() == HID::NpadIdType::Handheld ? "handheld"
+                                                                                : "player1"},
+             {"connected", controller->IsConnected()},
+             {"style", static_cast<int>(controller->GetNpadStyleIndex())},
+             {"input", active}});
+    }
+    return list;
 }
 
 /// g_nx2_present_hook while input_record records. Runs right after the present count becomes
@@ -919,7 +968,7 @@ void RecordPresent(u64 present) {
     if (!recorder.recording || recorder.recording->Truncated()) {
         return;
     }
-    if (!recorder.recording->Add(present, GameInput(*recorder.controller))) {
+    if (!recorder.recording->Add(present, GameInput(recorder.sources))) {
         g_nx2_present_hook.store(nullptr, std::memory_order_release);
     }
 }
@@ -930,7 +979,7 @@ void StopRecording() {
     std::scoped_lock lock{recorder.mutex};
     g_nx2_present_hook.store(nullptr, std::memory_order_release);
     recorder.recording.reset();
-    recorder.controller = nullptr;
+    recorder.sources = {};
 }
 
 /// {action: "start" | "status" | "stop"}. Records the input the game is given at each present
@@ -952,7 +1001,7 @@ json InputRecord(ToolState& state, const json& params) {
                 "already recording since present {}; stop it first",
                 recorder.recording->StartPresent())};
         }
-        recorder.controller = picked.first;
+        recorder.sources = RecordedControllers(state);
         recorder.controller_name = picked.second;
         // The hook goes in first. A present counted meanwhile waits for the lock, then is
         // recorded or ignored by the start present read below, so none is lost.
@@ -964,16 +1013,18 @@ json InputRecord(ToolState& state, const json& params) {
                 {"controller", picked.second}};
     }
     if (action == "status") {
+        json controllers = ControllerStates(RecordedControllers(state));
         std::scoped_lock lock{recorder.mutex};
         if (!recorder.recording) {
-            return {{"recording", false}};
+            return {{"recording", false}, {"controllers", std::move(controllers)}};
         }
         return {{"recording", true},
                 {"start_present", recorder.recording->StartPresent()},
                 {"presents", recorder.recording->Presents()},
                 {"steps", recorder.recording->Steps().size()},
                 {"controller", recorder.controller_name},
-                {"truncated", recorder.recording->Truncated()}};
+                {"truncated", recorder.recording->Truncated()},
+                {"controllers", std::move(controllers)}};
     }
     if (action == "stop") {
         std::optional<InputRecording> recording;
@@ -986,7 +1037,7 @@ json InputRecord(ToolState& state, const json& params) {
             g_nx2_present_hook.store(nullptr, std::memory_order_release);
             recording = std::move(recorder.recording);
             recorder.recording.reset();
-            recorder.controller = nullptr;
+            recorder.sources = {};
             name = std::move(recorder.controller_name);
         }
         json steps = json::array();

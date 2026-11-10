@@ -404,11 +404,12 @@ per game present, so its clips drift when replayed with `input_sequence` (H48).
 | Action | Result |
 | --- | --- |
 | `start` | `{recording: true, start_present, controller}`. Fails while a recording runs. |
-| `status` | `{recording: false}`, or `{recording: true, start_present, presents, steps, controller, truncated}`, where `steps` is a count. |
+| `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, truncated, controllers}`, where `steps` is a count. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
 | `stop` | `{steps: [...], presents, start_present, end_present, controller, truncated}`. Fails when nothing records. |
 
-- `controller` is `player1`, or `handheld` when player 1 is not connected: the same choice
-  `input` makes, made once at `start`.
+- `controller` is the controller a replay goes to: `player1`, or `handheld` when player 1 is
+  not connected, the same choice `input` makes, made once at `start`. The recording itself reads
+  both (see below).
 - `start_present` is `g_nx2_present_count + 1` at `start`, the next present.
   `end_present = start_present + presents - 1`. With `presents: 0`, `steps` is empty.
 - `steps` are frame steps in the `input_sequence` format, run-length encoded. They sum to
@@ -424,8 +425,13 @@ per game present, so its clips drift when replayed with `input_sequence` (H48).
 
 Where it samples: `g_nx2_present_hook` is set only while recording. nx2:vi2 229
 (`src/core/hle/service/nx2_gsv.h`) calls it right after it counts present c, on the present
-thread. It reads `GetNpadButtons` and `GetSticks` of the controller, the getters the npad
-updater reads every 1 ms. The injector also answers them by the present count, so for a replay
+thread. It reads `GetNpadButtons` and `GetSticks` of player 1 and of the handheld controller,
+each while it is connected: the getters the npad updater reads every 1 ms. The buttons are ORed
+and each stick keeps the larger deflection. Both are read because they have separate bindings
+(`players[0]` and `players[8]`) and the npad updater gives the game every connected npad
+(`npad.cpp`, `RequestPadStateUpdate`): in handheld mode the owner's pad can drive the handheld
+npad while player 1 is connected and idle. The first live clips (v1.0.0a-20261109-10) read player
+1 only and lost the owner's input after 400 to 1900 presents. The injector also answers them by the present count, so for a replay
 the input read at present c is exactly what the game gets during count c. For the owner's own
 pad it is the state at the moment of present c. A press that starts later during count c shows
 from present c + 1 in the recording. When not recording, the cost is one atomic load per present.

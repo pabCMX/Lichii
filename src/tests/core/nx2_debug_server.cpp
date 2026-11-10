@@ -735,7 +735,11 @@ TEST_CASE("Debug input recordings replay the input the game was given at each pr
         return Core::Nx2Debug::CallTool(system, "input_record", {{"action", action}});
     };
     REQUIRE_THROWS(record("stop"));
-    REQUIRE(record("status") == json{{"recording", false}});
+    const json idle_status = record("status");
+    REQUIRE(idle_status["recording"] == false);
+    REQUIRE(idle_status["controllers"][0] ==
+            json{{"npad", "player1"}, {"connected", true}, {"style", 3}, {"input", false}});
+    REQUIRE(idle_status["controllers"][1]["npad"] == "handheld");
     REQUIRE_THROWS(record("pause"));
 
     FakePresenter presenter;
@@ -817,4 +821,36 @@ TEST_CASE("Debug input recordings replay the input the game was given at each pr
     const json first = check_round_trip(script);
     // Replaying the recording gives the game the same input at the same present offsets.
     static_cast<void>(check_round_trip(first["steps"]));
+
+    // The owner's pad may drive the handheld npad while player 1 is connected and idle: the game
+    // reads both, so the recording holds both.
+    auto& handheld = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Handheld);
+    handheld.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Handheld);
+    handheld.Connect();
+    handheld.SetInputInjector([] {
+        return std::optional{Core::HID::InjectedInput{
+            .buttons = Core::HID::NpadButton::Y,
+            .left = Core::HID::AnalogStickState{.x = 1000, .y = -2000},
+            .right = {}}};
+    });
+    SCOPE_EXIT {
+        handheld.SetInputInjector({});
+        handheld.Disconnect();
+    };
+    REQUIRE(record("start")["controller"] == "player1");
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    json status;
+    do {
+        std::this_thread::sleep_for(5ms);
+        status = record("status");
+    } while (status["presents"].get<u64>() < 5 && std::chrono::steady_clock::now() < deadline);
+    REQUIRE(status["controllers"][0]["input"] == false);
+    REQUIRE(status["controllers"][1]["input"] == true);
+    const json both = record("stop");
+    REQUIRE(both["presents"].get<u64>() >= 5);
+    for (const auto& input : per_present(both["steps"])) {
+        REQUIRE(input.buttons == Core::HID::NpadButton::Y);
+        REQUIRE(input.left->x == 1000);
+        REQUIRE(input.left->y == -2000);
+    }
 }
