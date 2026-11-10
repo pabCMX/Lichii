@@ -246,11 +246,11 @@ TOOLS = [
         "description": "Runs input steps back to back, each for exactly its 'frames' presented "
                        "frames, so a camera pan or walk replays identically for an A/B test. A "
                        "step without buttons or sticks leaves the owner's input alone. At most "
-                       "1000 steps and 36000 frames.",
+                       "6000 steps and 36000 frames.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "steps": {"type": "array", "minItems": 1, "maxItems": 1000,
+                "steps": {"type": "array", "minItems": 1, "maxItems": 6000,
                           "items": {"type": "object", "properties": {
                 "buttons": {"type": "array", "items": {"type": "string", "enum": BUTTONS}},
                 "left_stick": STICK,
@@ -261,6 +261,19 @@ TOOLS = [
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900},
             },
             "required": ["steps"],
+        },
+    },
+    {
+        "name": "input_record",
+        "description": "Records the input the game is given (player 1, or the handheld "
+                       "controller) once per present, from the next present on. 'start' begins, "
+                       "'status' reports, 'stop' returns 'steps' that input_sequence replays at "
+                       "the same present offsets. At most 36000 presents and 6000 steps, then "
+                       "'truncated' is true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"action": {"type": "string", "enum": ["start", "status", "stop"]}},
+            "required": ["action"],
         },
     },
     {
