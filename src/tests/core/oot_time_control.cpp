@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <bit>
 #include <cstring>
 #include <map>
@@ -28,7 +29,7 @@ constexpr size_t AddonOffset = 0x3C46200;
 /// Ocarina's main as the built-in patch tests lay it out: text ends at 0x3C461D0, read-only data
 /// starts at 0x3C47000, BSS ends at 0x4EA0000.
 std::vector<u8> MakeMain() {
-    std::vector<u8> nso(Header + TC::BlockOffset + TC::BlockSize);
+    std::vector<u8> nso(Header + TC::BlockOffset + TC::BlockSize + TC::TraceSize);
     Loader::NSOHeader header{};
     header.magic = Common::MakeMagic('N', 'S', 'O', '0');
     header.segments[0].size = 63201744;
@@ -121,7 +122,7 @@ class Hook {
 public:
     explicit Hook(const std::vector<u8>& patched) {
         env.Load(patched, TC::HookOffset, 4);
-        env.Load(patched, AddonOffset, 0x100 + 108);
+        env.Load(patched, AddonOffset, 0x100 + TC::RoutineSize);
         env.Write32(StepEnvironment::Base + TC::HookOffset + 4, 0xD4000001); // svc #0
         Dynarmic::A64::UserConfig config;
         config.callbacks = &env;
@@ -135,6 +136,21 @@ public:
         env.Write32(block, mode ? magic : 0);
         env.Write32(block + 4, mode ? static_cast<u32>(*mode) : 0);
         env.Write32(block + 8, std::bit_cast<u32>(value));
+    }
+
+    void Trace(u32 magic) {
+        env.Write32(StepEnvironment::Base + TC::TraceOffset, magic);
+    }
+    [[nodiscard]] u32 Read32(size_t module_offset) {
+        return static_cast<u32>(env.MemoryRead(StepEnvironment::Base + module_offset, 4));
+    }
+    /// Record i of the trace: s1, s0, the game's own step, the step returned.
+    [[nodiscard]] std::array<float, 4> Record(size_t i) {
+        std::array<float, 4> out;
+        for (size_t f = 0; f < out.size(); ++f) {
+            out[f] = std::bit_cast<float>(Read32(TC::TraceOffset + 16 + i * TC::TraceRecordSize + 4 * f));
+        }
+        return out;
     }
 
     /// The step the game gets (s8) for its s1 / s0. Checks that every register the routine may not
@@ -326,4 +342,39 @@ TEST_CASE("Time control mode changes on a running hook return to the game's step
     REQUIRE_THAT(hook.Run(30.0f, 60.0f), Catch::Matchers::WithinRel(3.0f, 1e-6f));
     hook.Set(TC::Mode::Off, 6.0f);
     own();
+}
+
+TEST_CASE("Time control traces each call with its inputs, own step and result, also when off",
+          "[oot_time_control]") {
+    const auto nso = MakeMain();
+    auto plain = nso;
+    REQUIRE(Apply(nso, plain));
+    Hook hook{plain};
+    // Not armed: nothing is written to the trace area.
+    REQUIRE(hook.Run(60.0f, 30.0f) == 2.0f);
+    REQUIRE(hook.Read32(TC::TraceOffset + 4) == 0);
+    REQUIRE(hook.Record(0) == std::array<float, 4>{});
+    // Armed with no control block magic (time control off): the game's own step, traced.
+    hook.Trace(TC::TraceMagic);
+    REQUIRE(hook.Run(60.0f, 30.0f) == 2.0f);
+    REQUIRE(hook.Read32(TC::TraceOffset + 4) == 1);
+    REQUIRE(hook.Record(0) == std::array<float, 4>{60.0f, 30.0f, 2.0f, 2.0f});
+    // With a mode, the own step and the step returned differ.
+    hook.Set(TC::Mode::Scale, 0.5f);
+    REQUIRE(hook.Run(30.0f, 60.0f) == 0.25f);
+    REQUIRE(hook.Record(1) == std::array<float, 4>{30.0f, 60.0f, 0.5f, 0.25f});
+    hook.Set(TC::Mode::Fixed, 2.0f);
+    REQUIRE_THAT(hook.Run(60.0f, 60.0f), Catch::Matchers::WithinRel(2.0f, 1e-6f));
+    REQUIRE(hook.Record(2)[2] == 1.0f);
+    // Call i goes to record i % 8.
+    for (int i = 0; i < 6; ++i) {
+        hook.Run(60.0f, 30.0f);
+    }
+    REQUIRE(hook.Read32(TC::TraceOffset + 4) == 9);
+    REQUIRE(hook.Record(0)[1] == 30.0f);
+    REQUIRE(hook.Record(1) == std::array<float, 4>{30.0f, 60.0f, 0.5f, 0.25f});
+    // Stopped (the off magic): the count stays.
+    hook.Trace(TC::TraceOffMagic);
+    hook.Run(60.0f, 30.0f);
+    REQUIRE(hook.Read32(TC::TraceOffset + 4) == 9);
 }

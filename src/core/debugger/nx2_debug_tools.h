@@ -61,6 +61,11 @@ private:
 
 /// Copies guest memory from a thread that is not a guest CPU core (docs/nx2/debug-mcp.md, "Guest
 /// and GPU memory"). Returns the first address that is not mapped; out is then partly written.
+/// Sets (or clears, with null) the trainer's step trace on the present path: trace(present) runs
+/// in g_nx2_present_reply_hook after the replay and recorder parts, which share that hook. The
+/// hook stays on while any of them needs it, so a recording and a trace can run at once.
+void SetPresentReplyTrace(void (*trace)(u64));
+
 [[nodiscard]] std::optional<u64> ReadGuestMemory(Memory::Memory& memory, u64 address,
                                                  std::span<u8> out);
 
