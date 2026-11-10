@@ -578,7 +578,10 @@ Hotkey: **Record Input (Per Present)** (default Ctrl+F8, Configure > Hotkeys) st
 recording, and pressed again stops it and saves the `stop` reply to the TAS folder
 (`<user dir>/tas/present-record-<n>.json`, the first free n). It works only while a game runs with
 `EDEN_NX2_DEBUG_SERVER` set. The status bar shows `REC INPUT <presents> presents` while any
-recording runs, also one the debug server started, and shows the saved path after stop. The
+recording runs, also one the debug server started. After the stop it shows `Input recording of
+<n> presents saved to <path>` for 10 s, at the left of the status bar (the label's tooltip has the
+whole path when the bar cuts it). Until 2026-11-10 this text did not show: it went to
+`QStatusBar::showMessage`, whose space the status bar buttons cover. The
 hotkey and the debug server use the same recording: a `stop` from either one ends it. Leaving the
 game discards a running recording, so stop it first. A controller combo can be set for it in
 Configure > Hotkeys. Controller hotkeys read player 1 only (`MainWindow::LinkActionShortcut`), and

@@ -1009,7 +1009,14 @@ void MainWindow::InitializeWidgets() {
     message_label->setFrameStyle(QFrame::NoFrame);
     message_label->setContentsMargins(4, 0, 4, 0);
     message_label->setAlignment(Qt::AlignLeft);
+    // A long message is cut at the label's width, never makes the window wider.
+    message_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     statusBar()->addPermanentWidget(message_label, 1);
+    status_message_timer.setSingleShot(true);
+    connect(&status_message_timer, &QTimer::timeout, this, [this] {
+        message_label->clear();
+        message_label->setToolTip(QString{});
+    });
 
     shader_building_label = new QLabel();
     shader_building_label->setToolTip(tr("The amount of shaders currently being built"));
@@ -5439,8 +5446,8 @@ void MainWindow::OnTasStateChanged() {
 
 void MainWindow::OnPresentRecordToggle() {
     if (!emulation_running || !Core::Nx2Debug::IsServiceRunning()) {
-        statusBar()->showMessage(
-            tr("Input recording needs a running game and EDEN_NX2_DEBUG_SERVER"), 5000);
+        ShowStatusMessage(tr("Input recording needs a running game and EDEN_NX2_DEBUG_SERVER"),
+                          5000);
         return;
     }
     try {
@@ -5470,17 +5477,22 @@ void MainWindow::OnPresentRecordToggle() {
             const auto presents = stopped["presents"].get<u64>();
             LOG_INFO(Frontend, "Input recording of {} presents saved to {}{}", presents,
                      path.string(), stopped["truncated"].get<bool>() ? " (truncated)" : "");
-            statusBar()->showMessage(tr("Input recording of %1 presents saved to %2")
-                                         .arg(presents)
-                                         .arg(QString::fromStdString(path.string())),
-                                     10000);
+            ShowStatusMessage(tr("Input recording of %1 presents saved to %2")
+                                  .arg(presents)
+                                  .arg(QString::fromStdString(path.string())),
+                              10000);
         }
     } catch (const std::exception& error) {
         LOG_ERROR(Frontend, "Input recording: {}", error.what());
-        statusBar()->showMessage(tr("Input recording: %1").arg(QString::fromUtf8(error.what())),
-                                 10000);
+        ShowStatusMessage(tr("Input recording: %1").arg(QString::fromUtf8(error.what())), 10000);
     }
     UpdatePresentRecordLabel();
+}
+
+void MainWindow::ShowStatusMessage(const QString& message, int milliseconds) {
+    message_label->setText(message);
+    message_label->setToolTip(message); // the whole text, also when the label cuts it
+    status_message_timer.start(milliseconds);
 }
 
 void MainWindow::UpdatePresentRecordLabel() {
