@@ -265,9 +265,10 @@ TOOLS = [
     },
     {
         "name": "input_record",
-        "description": "Records the input the game is given (player 1, or the handheld "
+        "description": "Records the input the game is given (player 1 and the handheld "
                        "controller) once per present, from the next present on. 'start' begins, "
-                       "'status' reports, 'stop' returns 'steps' that input_sequence replays at "
+                       "'status' reports, also per controller, 'stop' returns 'steps' that "
+                       "input_sequence replays at "
                        "the same present offsets. At most 36000 presents and 6000 steps, then "
                        "'truncated' is true.",
         "inputSchema": {
