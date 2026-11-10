@@ -214,8 +214,10 @@ TEST_CASE("Time control installs around the game's step or the add-on's", "[oot_
         REQUIRE(Apply(nso, out));
         REQUIRE(WordAt(out, TC::HookOffset) == RoutineCall);
         REQUIRE(WordAt(out, TC::RoutineOffset) == 0x18FFF80B);
-        REQUIRE(WordAt(out, TC::RoutineOffset + 100) == TC::Magic);
+        REQUIRE(WordAt(out, TC::RoutineOffset + TC::RoutineSize - 12) == TC::Magic);
+        REQUIRE(WordAt(out, TC::RoutineOffset + TC::RoutineSize - 4) == TC::TraceMagic);
         REQUIRE(WordAt(out, TC::BlockOffset) == 0);
+        REQUIRE(WordAt(out, TC::TraceOffset) == 0);
         TC::Publish("sdk", 0x9000000);
         TC::Publish("main", 0x8000000);
         REQUIRE(TC::BlockAddress() == 0x8000000 + TC::BlockOffset);
@@ -243,6 +245,9 @@ TEST_CASE("Time control refuses changed bytes and layouts", "[oot_time_control]"
     check([](auto& nso) { SetWord(nso, TC::RoutineOffset + 8, 1); }, none);
     check(none, [](auto& out) { SetWord(out, TC::RoutineOffset, 1); });
     check(none, [](auto& out) { SetWord(out, TC::BlockOffset + 12, 1); });
+    // The end of the longer routine, and the step trace after the block, must be free too.
+    check([](auto& nso) { SetWord(nso, TC::RoutineOffset + TC::RoutineSize - 4, 1); }, none);
+    check(none, [](auto& out) { SetWord(out, TC::TraceOffset + TC::TraceSize - 4, 1); });
     // Text that reaches the cave, read-only data before its end, BSS that ends before the block.
     const auto header = [](auto&& edit) {
         return [edit](std::vector<u8>& nso) {
@@ -255,6 +260,7 @@ TEST_CASE("Time control refuses changed bytes and layouts", "[oot_time_control]"
     check(header([](auto& h) { h.segments[0].size = TC::RoutineOffset + 4; }), none);
     check(header([](auto& h) { h.segments[1].location = TC::RoutineOffset + 64; }), none);
     check(header([](auto& h) { h.segments[2].bss_size -= 0x200; }), none);
+    check(header([](auto& h) { h.segments[2].bss_size -= 0x70; }), none); // BSS ends inside the trace
     // A truncated module.
     check([](auto& nso) { nso.resize(nso.size() - 1); }, none);
 }
