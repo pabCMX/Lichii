@@ -13,6 +13,7 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <mutex>
 #include <numeric>
 #include <thread>
 #include <tuple>
@@ -50,9 +51,9 @@ constexpr u64 MAX_READ = 64 * 1024;
 /// Presented frames one input or input_sequence call holds at most (10 minutes at 60 fps).
 constexpr u64 MAX_INPUT_FRAMES = 36000;
 constexpr u64 MAX_INPUT_MS = 600'000;
-/// Steps per input_sequence call. A step with both sticks and two buttons is about 110 bytes, so
-/// 6000 steps fit the 1 MB request limit (nx2_debug_server.cpp): 100 s of a stick that moves at
-/// every present at 60 presents/s.
+/// Steps per input_sequence call and per input_record recording. A recorded step with both
+/// sticks and two buttons is about 110 bytes, so 6000 steps fit the 1 MB request limit
+/// (nx2_debug_server.cpp): 100 s of a stick that moves at every present at 60 presents/s.
 constexpr size_t MAX_INPUT_STEPS = 6000;
 /// Presents one measured input holds at most: the present-time ring, less 256 presents of margin
 /// for presents that land while the measurement is read.
@@ -716,6 +717,21 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     return result;
 }
 
+/// The controller input and input_record use: player 1, or the handheld controller when player 1
+/// is not connected.
+std::pair<HID::EmulatedController*, std::string> InputController(ToolState& state) {
+    auto& hid = state.system.HIDCore();
+    HID::EmulatedController* const player1 = hid.GetEmulatedController(HID::NpadIdType::Player1);
+    if (player1->IsConnected()) {
+        return {player1, "player1"};
+    }
+    HID::EmulatedController* const handheld = hid.GetEmulatedController(HID::NpadIdType::Handheld);
+    if (handheld->IsConnected()) {
+        return {handheld, "handheld"};
+    }
+    throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
+}
+
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
 /// the next present on, and returns once they are done. The injector stops by itself after the
 /// last step; leaving this function by any path removes it.
@@ -740,16 +756,9 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         throw std::runtime_error{
             fmt::format("measured input is limited to {} presents", MAX_MEASURED_PRESENTS)};
     }
-    auto& hid = state.system.HIDCore();
-    HID::EmulatedController* controller = hid.GetEmulatedController(HID::NpadIdType::Player1);
-    std::string name = "player1";
-    if (!controller->IsConnected()) {
-        controller = hid.GetEmulatedController(HID::NpadIdType::Handheld);
-        name = "handheld";
-    }
-    if (!controller->IsConnected()) {
-        throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
-    }
+    const auto picked = InputController(state);
+    HID::EmulatedController* const controller = picked.first;
+    const std::string& name = picked.second;
     const u64 total_s = timed ? total / 1000 : total / 20;
     const int timeout = Param<int>(params, "timeout_s", static_cast<int>(total_s + 10), 1, 900);
     if (timed && std::chrono::seconds{timeout} <= std::chrono::milliseconds{total}) {
@@ -876,6 +885,124 @@ json InputSequence(ToolState& state, const json& params, const ClientGone& clien
     return RunInput(state, steps, params, client_gone);
 }
 
+/// The process's one input_record recording. RecordPresent reads it on the present thread; the
+/// input_record handler and Service shutdown change it. All of them hold mutex.
+struct Recorder {
+    std::mutex mutex;
+    HID::EmulatedController* controller{};
+    std::string controller_name;
+    std::optional<InputRecording> recording;
+};
+
+Recorder& GetRecorder() {
+    static Recorder recorder;
+    return recorder;
+}
+
+/// What the game is given now: the two getters the npad updater reads, limited to the buttons an
+/// input step can hold.
+HID::InjectedInput GameInput(const HID::EmulatedController& controller) {
+    const HID::NpadButton held = controller.GetNpadButtons().raw;
+    HID::NpadButton buttons{};
+    for (const auto& [name, button] : INPUT_BUTTONS) {
+        buttons |= held & button;
+    }
+    const HID::AnalogSticks sticks = controller.GetSticks();
+    return {.buttons = buttons, .left = sticks.left, .right = sticks.right};
+}
+
+/// g_nx2_present_hook while input_record records. Runs right after the present count becomes
+/// present, so it reads the input the injector and the owner's pad give for that count.
+void RecordPresent(u64 present) {
+    Recorder& recorder = GetRecorder();
+    std::scoped_lock lock{recorder.mutex};
+    if (!recorder.recording || recorder.recording->Truncated()) {
+        return;
+    }
+    if (!recorder.recording->Add(present, GameInput(*recorder.controller))) {
+        g_nx2_present_hook.store(nullptr, std::memory_order_release);
+    }
+}
+
+/// Ends any recording without a result, so the present path no longer reads the controller.
+void StopRecording() {
+    Recorder& recorder = GetRecorder();
+    std::scoped_lock lock{recorder.mutex};
+    g_nx2_present_hook.store(nullptr, std::memory_order_release);
+    recorder.recording.reset();
+    recorder.controller = nullptr;
+}
+
+/// {action: "start" | "status" | "stop"}. Records the input the game is given at each present
+/// from the next one on; stop returns it as input_sequence steps.
+json InputRecord(ToolState& state, const json& params) {
+    for (const auto& [key, value] : params.items()) {
+        if (key != "action") {
+            throw std::runtime_error{fmt::format("unknown key \"{}\": want action", key)};
+        }
+    }
+    const json action_value = params.value("action", json{});
+    const std::string action = action_value.is_string() ? action_value.get<std::string>() : "";
+    Recorder& recorder = GetRecorder();
+    if (action == "start") {
+        const auto picked = InputController(state);
+        std::scoped_lock lock{recorder.mutex};
+        if (recorder.recording) {
+            throw std::runtime_error{fmt::format(
+                "already recording since present {}; stop it first",
+                recorder.recording->StartPresent())};
+        }
+        recorder.controller = picked.first;
+        recorder.controller_name = picked.second;
+        // The hook goes in first. A present counted meanwhile waits for the lock, then is
+        // recorded or ignored by the start present read below, so none is lost.
+        g_nx2_present_hook.store(RecordPresent, std::memory_order_release);
+        recorder.recording.emplace(g_nx2_present_count.load(std::memory_order_relaxed) + 1,
+                                   MAX_INPUT_FRAMES, MAX_INPUT_STEPS);
+        return {{"recording", true},
+                {"start_present", recorder.recording->StartPresent()},
+                {"controller", picked.second}};
+    }
+    if (action == "status") {
+        std::scoped_lock lock{recorder.mutex};
+        if (!recorder.recording) {
+            return {{"recording", false}};
+        }
+        return {{"recording", true},
+                {"start_present", recorder.recording->StartPresent()},
+                {"presents", recorder.recording->Presents()},
+                {"steps", recorder.recording->Steps().size()},
+                {"controller", recorder.controller_name},
+                {"truncated", recorder.recording->Truncated()}};
+    }
+    if (action == "stop") {
+        std::optional<InputRecording> recording;
+        std::string name;
+        {
+            std::scoped_lock lock{recorder.mutex};
+            if (!recorder.recording) {
+                throw std::runtime_error{"not recording"};
+            }
+            g_nx2_present_hook.store(nullptr, std::memory_order_release);
+            recording = std::move(recorder.recording);
+            recorder.recording.reset();
+            recorder.controller = nullptr;
+            name = std::move(recorder.controller_name);
+        }
+        json steps = json::array();
+        for (const InputStep& step : recording->Steps()) {
+            steps.push_back(InputStepJson(step));
+        }
+        return {{"steps", std::move(steps)},
+                {"presents", recording->Presents()},
+                {"start_present", recording->StartPresent()},
+                {"end_present", recording->StartPresent() + recording->Presents() - 1},
+                {"controller", std::move(name)},
+                {"truncated", recording->Truncated()}};
+    }
+    throw std::runtime_error{"action must be start, status or stop"};
+}
+
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     const auto handler = [&state](json (*tool)(ToolState&, const json&)) -> Handler {
         return [state, tool](const json& params, const ClientGone&) { return tool(*state, params); };
@@ -905,6 +1032,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"read_gpu_memory", handler(ReadGpuMemory)},
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},
+        {"input_record", handler(InputRecord)},
     };
 }
 
@@ -1141,6 +1269,65 @@ std::optional<HID::InjectedInput> InputAt(std::span<const InputStep> steps, u64 
     return std::nullopt;
 }
 
+json InputStepJson(const InputStep& step) {
+    json result{{"frames", step.frames}};
+    json buttons = json::array();
+    for (const auto& [name, button] : INPUT_BUTTONS) {
+        if ((step.input.buttons & button) != HID::NpadButton::None) {
+            buttons.push_back(name);
+        }
+    }
+    if (!buttons.empty()) {
+        result["buttons"] = std::move(buttons);
+    }
+    // Five decimals keep the JSON short and are exact: 0.5e-5 * HID_JOYSTICK_MAX is 0.16, so
+    // ParseInputStep rounds back to the same value.
+    const auto axis = [](s32 value) {
+        const double scaled = static_cast<double>((std::clamp)(value, -HID::HID_JOYSTICK_MAX,
+                                                               HID::HID_JOYSTICK_MAX)) /
+                              HID::HID_JOYSTICK_MAX;
+        return std::round(scaled * 100'000.0) / 100'000.0;
+    };
+    const auto stick = [&](const char* key, const std::optional<HID::AnalogStickState>& value) {
+        if (value) {
+            result[key] = json::array({axis(value->x), axis(value->y)});
+        }
+    };
+    stick("left_stick", step.input.left);
+    stick("right_stick", step.input.right);
+    return result;
+}
+
+InputRecording::InputRecording(u64 start_present_, u64 max_presents_, size_t max_steps_)
+    : start_present{start_present_}, next_present{start_present_}, max_presents{max_presents_},
+      max_steps{max_steps_} {}
+
+bool InputRecording::Add(u64 present, const HID::InjectedInput& input) {
+    if (truncated || present < next_present) {
+        return !truncated;
+    }
+    const auto same_stick = [](const std::optional<HID::AnalogStickState>& a,
+                               const std::optional<HID::AnalogStickState>& b) {
+        return a.has_value() == b.has_value() && (!a || (a->x == b->x && a->y == b->y));
+    };
+    const u64 wanted = present - next_present + 1;
+    const u64 frames = (std::min)(wanted, max_presents - Presents());
+    const bool same = !steps.empty() && steps.back().input.buttons == input.buttons &&
+                      same_stick(steps.back().input.left, input.left) &&
+                      same_stick(steps.back().input.right, input.right);
+    if (frames != 0 && same) {
+        steps.back().frames += frames;
+    } else if (frames != 0 && steps.size() < max_steps) {
+        steps.push_back({.input = input, .frames = frames});
+    } else {
+        truncated = true;
+        return false;
+    }
+    next_present += frames;
+    truncated = frames < wanted;
+    return !truncated;
+}
+
 std::optional<HID::InjectedInput> InputAtTime(std::span<const InputStep> steps, u64 elapsed_us) {
     u64 end = 0;
     for (const InputStep& step : steps) {
@@ -1164,7 +1351,9 @@ Service::Service(System& system, std::string title, u64 program_id, const Endpoi
 
 Service::~Service() {
     state->stopping.store(true, std::memory_order_relaxed);
+    // After the server, whose one thread runs every handler, so no input_record start follows.
     server.reset();
+    StopRecording();
 }
 
 std::unique_ptr<Service> MaybeStartService(System& system, std::string title, u64 program_id) {

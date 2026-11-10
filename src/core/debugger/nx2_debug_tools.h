@@ -91,6 +91,44 @@ struct InputStep {
 /// std::runtime_error on unknown keys, buttons or out-of-range values.
 [[nodiscard]] InputStep ParseInputStep(const nlohmann::json& step);
 
+/// A frame-counted step as JSON that ParseInputStep reads back to the same input: buttons when
+/// any are held, and both sticks when the step sets them.
+[[nodiscard]] nlohmann::json InputStepJson(const InputStep& step);
+
+/// An input_record recording: one input per present from start_present on, run-length encoded
+/// into frame-counted steps. It keeps at most max_presents presents and max_steps steps; past
+/// either it is truncated and keeps what it has.
+class InputRecording {
+public:
+    InputRecording(u64 start_present, u64 max_presents, size_t max_steps);
+
+    /// Records the input the game is given at present `present`. A present before the next
+    /// expected one is ignored; skipped presents get this input too. False once truncated.
+    bool Add(u64 present, const HID::InjectedInput& input);
+
+    [[nodiscard]] const std::vector<InputStep>& Steps() const {
+        return steps;
+    }
+    [[nodiscard]] u64 StartPresent() const {
+        return start_present;
+    }
+    /// Presents recorded: end_present = StartPresent() + Presents() - 1.
+    [[nodiscard]] u64 Presents() const {
+        return next_present - start_present;
+    }
+    [[nodiscard]] bool Truncated() const {
+        return truncated;
+    }
+
+private:
+    std::vector<InputStep> steps;
+    u64 start_present;
+    u64 next_present;
+    u64 max_presents;
+    size_t max_steps;
+    bool truncated{};
+};
+
 /// The input of the timed step active elapsed_us after the start; nothing from the end on.
 [[nodiscard]] std::optional<HID::InjectedInput> InputAtTime(std::span<const InputStep> steps,
                                                            u64 elapsed_us);
