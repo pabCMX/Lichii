@@ -152,7 +152,8 @@ json Resume(TrainerState& state, const json& params, const ClientGone& client_go
 // capture is requested while the game is paused and the GPU has drained, with two presents left:
 // the frame end of the first takes the request and arms the frame dump (RasterizerVulkan::
 // TickFrame), which records the next frame, the last present stepped. So a capture steps at least
-// two presents, and frames: 1 with capture advances 2 and captures the frame the game stops on.
+// two presents, and frames: 1 with capture advances 2. The capture is of exactly capture_present;
+// the frontend's pause can land after it ("overshoot" presents), as for any step.
 json StepFrames(TrainerState& state, const json& params, const ClientGone& client_gone) {
     RequireGame(state);
     const json& value = params.at("frames");
@@ -204,6 +205,8 @@ json StepFrames(TrainerState& state, const json& params, const ClientGone& clien
         }
         result["capture"] = end(false);
         result["capture_present"] = before + 2;
+        // The frontend's pause can land a present or two after the captured frame (present-granular).
+        result["overshoot"] = Presents() - (before + 2);
     } else if (!capturing) {
         complete = step(frames);
     }
