@@ -289,7 +289,7 @@ TOOLS = [
     {
         "name": "features",
         "description": "What this build's debug server supports beyond origin: {features: "
-                       "[...], kit}. An older exe answers 'unknown method'.",
+                       "[...], kit}. An older exe answers 'unknown method'. kit 2 has npad_sync.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {

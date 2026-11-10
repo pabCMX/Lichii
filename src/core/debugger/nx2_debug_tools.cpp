@@ -769,6 +769,9 @@ void DropReplyHook() {
 struct ReplaySync {
     std::mutex mutex;
     bool active{};
+    /// npad_sync: one npad update at each covered present's reply, so the newest entry carries
+    /// that present's step when the game resumes.
+    bool sync{true};
     u64 start{};
     u64 end{};
     std::vector<u64> stale;
@@ -780,11 +783,12 @@ ReplaySync& GetReplaySync() {
 }
 
 /// Reply hook part of a replay: notes present when the last npad update started before its count.
-void NoteReplayReply(u64 present) {
+/// True when the replay wants the npad updated at this reply.
+bool NoteReplayReply(u64 present) {
     ReplaySync& sync = GetReplaySync();
     std::scoped_lock lock{sync.mutex};
     if (!sync.active || present < sync.start || present >= sync.end) {
-        return;
+        return false;
     }
     const u64 counted_ns =
         g_nx2_present_times_ns[present % g_nx2_present_times_ns.size()].load(std::memory_order_acquire);
@@ -792,6 +796,7 @@ void NoteReplayReply(u64 present) {
         ::Service::HID::g_npad_update_ns.load(std::memory_order_acquire) < counted_ns) {
         sync.stale.push_back(present - sync.start);
     }
+    return sync.sync;
 }
 
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
@@ -831,6 +836,10 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         }
         start_present = value.get<u64>();
     }
+    if (params.contains("npad_sync") && !params.at("npad_sync").is_boolean()) {
+        throw std::runtime_error{"npad_sync must be true or false"};
+    }
+    const bool npad_sync = params.value("npad_sync", true);
     const auto picked = InputController(state);
     HID::EmulatedController* const controller = picked.first;
     const std::string& name = picked.second;
@@ -856,6 +865,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         ReplaySync& sync = GetReplaySync();
         std::scoped_lock lock{sync.mutex};
         sync.active = true;
+        sync.sync = npad_sync;
         sync.start = start;
         sync.end = start + total;
         sync.stale.clear();
@@ -944,6 +954,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         result["clock"] = "host_time";
     } else if (measure || start_present) {
         result["landed_present"] = landed;
+        result["npad_sync"] = npad_sync;
         ReplaySync& sync = GetReplaySync();
         std::scoped_lock lock{sync.mutex};
         result["stale_presents"] = sync.stale;
@@ -980,6 +991,7 @@ json Input(ToolState& state, const json& params, const ClientGone& client_gone) 
     step.erase("timeout_s");
     step.erase("measure");
     step.erase("start_present");
+    step.erase("npad_sync");
     return RunInput(state, {ParseInputStep(step)}, params, client_gone);
 }
 
@@ -1029,6 +1041,9 @@ struct Recorder {
     u64 blocked_max_us{};
     u64 blocked_presents{};
     bool uses_reply_hook{};
+    /// Mode "any": one npad update at each present's reply, as replays do, so the reply stick
+    /// is exactly the newest npad entry the game reads next.
+    bool npad_sync{};
 };
 
 Recorder& GetRecorder() {
@@ -1185,8 +1200,21 @@ void RecordNpadRead(const HID::EmulatedController& controller) {
     }
 }
 
+/// Mode "any" with npad_sync: whether the open count wants the npad updated at its reply.
+bool RecordingWantsSync(u64 present) {
+    Recorder& recorder = GetRecorder();
+    std::scoped_lock lock{recorder.mutex};
+    return recorder.npad_sync && recorder.open && recorder.open->present == present;
+}
+
+/// g_nx2_present_reply_hook: the stale check of a replay, then the npad update a replay or a
+/// recording asks for (outside the recorder lock: the update takes the npad lock and then calls
+/// the npad read hook), then the recording's reply sample, which reads the same getters.
 void PresentReply(u64 present) {
-    NoteReplayReply(present);
+    const bool replay_sync = NoteReplayReply(present);
+    if (replay_sync || RecordingWantsSync(present)) {
+        static_cast<void>(::Service::HID::UpdateNpadNow());
+    }
     RecordPresentReply(present);
 }
 
@@ -1206,8 +1234,9 @@ void StopRecording() {
 /// is given at each present from the next one on; stop returns it as input_sequence steps.
 json InputRecord(ToolState& state, const json& params) {
     for (const auto& [key, value] : params.items()) {
-        if (key != "action" && key != "mode") {
-            throw std::runtime_error{fmt::format("unknown key \"{}\": want action or mode", key)};
+        if (key != "action" && key != "mode" && key != "npad_sync") {
+            throw std::runtime_error{
+                fmt::format("unknown key \"{}\": want action, mode or npad_sync", key)};
         }
     }
     const json action_value = params.value("action", json{});
@@ -1218,6 +1247,10 @@ json InputRecord(ToolState& state, const json& params) {
         if (mode != "any" && mode != "sample") {
             throw std::runtime_error{"mode must be any or sample"};
         }
+        if (params.contains("npad_sync") && !params.at("npad_sync").is_boolean()) {
+            throw std::runtime_error{"npad_sync must be true or false"};
+        }
+        const bool npad_sync = params.value("npad_sync", true);
         const auto picked = InputController(state);
         std::scoped_lock lock{recorder.mutex};
         if (recorder.recording) {
@@ -1228,6 +1261,7 @@ json InputRecord(ToolState& state, const json& params) {
         recorder.sources = RecordedControllers(state);
         recorder.controller_name = picked.second;
         recorder.any = mode == "any";
+        recorder.npad_sync = recorder.any && npad_sync;
         recorder.open.reset();
         recorder.blocked_sum_us = recorder.blocked_max_us = recorder.blocked_presents = 0;
         // The hooks go in first. A present counted meanwhile waits for the lock, then is
@@ -1249,7 +1283,8 @@ json InputRecord(ToolState& state, const json& params) {
         return {{"recording", true},
                 {"start_present", recorder.recording->StartPresent()},
                 {"controller", picked.second},
-                {"mode", mode}};
+                {"mode", mode},
+                {"npad_sync", recorder.npad_sync}};
     }
     if (action == "status") {
         json controllers = ControllerStates(RecordedControllers(state));
@@ -1272,6 +1307,7 @@ json InputRecord(ToolState& state, const json& params) {
         std::optional<InputRecording> at_count;
         std::string name;
         bool any{};
+        bool npad_sync{};
         u64 blocked_sum_us{}, blocked_max_us{}, blocked_presents{};
         {
             std::scoped_lock lock{recorder.mutex};
@@ -1282,6 +1318,7 @@ json InputRecord(ToolState& state, const json& params) {
             // The count running now ends here: its step holds what the game got so far.
             static_cast<void>(CloseCount(recorder));
             any = recorder.any;
+            npad_sync = recorder.npad_sync;
             recording = std::move(recorder.recording);
             recorder.recording.reset();
             at_count = std::move(recorder.at_count);
@@ -1305,6 +1342,7 @@ json InputRecord(ToolState& state, const json& params) {
                        {"end_present", recording->StartPresent() + recording->Presents() - 1},
                        {"controller", std::move(name)},
                        {"mode", any ? "any" : "sample"},
+                       {"npad_sync", npad_sync},
                        {"truncated", recording->Truncated() || (at_count && at_count->Truncated())}};
         if (at_count) {
             result["steps_at_count"] = steps_json(*at_count);
@@ -1363,8 +1401,8 @@ json LumaWatch(ToolState& state, const json& params, const ClientGone& client_go
 json Features(ToolState&, const json&) {
     return {{"features",
              {"input_ms", "measure", "input_record", "record_mode", "start_present",
-              "landed_present", "screenshot_present", "luma_watch"}},
-            {"kit", 1}};
+              "landed_present", "screenshot_present", "luma_watch", "npad_sync"}},
+            {"kit", 2}};
 }
 
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {

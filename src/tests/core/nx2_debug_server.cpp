@@ -1052,8 +1052,8 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
             json{{"features",
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
-                   "landed_present", "screenshot_present", "luma_watch"}},
-                 {"kit", 1}});
+                   "landed_present", "screenshot_present", "luma_watch", "npad_sync"}},
+                 {"kit", 2}});
 }
 
 TEST_CASE("Input recordings take the stick at the present's reply", "[core][nx2_debug_server]") {
@@ -1102,13 +1102,21 @@ TEST_CASE("Input recordings take the stick at the present's reply", "[core][nx2_
     REQUIRE(sticks(stopped["steps"]) == std::vector<s32>{2000, 4000, 6000, 7000});
     REQUIRE(sticks(stopped["steps_at_count"]) == std::vector<s32>{1000, 3000, 5000, 7000});
     REQUIRE(stopped["presents"] == 4);
+    REQUIRE(stopped["npad_sync"] == true);
     REQUIRE(stopped["blocked_us"]["presents"] == 3);
     REQUIRE(stopped["blocked_us"]["max"].get<u64>() >= stopped["blocked_us"]["mean"].get<u64>());
     // Mode sample keeps one phase and no blocked time.
     static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record",
                                                {{"action", "start"}, {"mode", "sample"}}));
     const json sampled = Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}});
+    REQUIRE(sampled["npad_sync"] == false);
     REQUIRE_FALSE(sampled.contains("steps_at_count"));
+    // A recording made without the npad update at the reply says so.
+    REQUIRE(Core::Nx2Debug::CallTool(system, "input_record",
+                                     {{"action", "start"}, {"npad_sync", false}})["npad_sync"] ==
+            false);
+    REQUIRE(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}})["npad_sync"] ==
+            false);
     REQUIRE_FALSE(sampled.contains("blocked_us"));
 }
 
@@ -1157,5 +1165,8 @@ TEST_CASE("Debug input names the presents whose newest npad entry was older than
         {{"steps", {{{"buttons", {"A"}}, {"frames", 3}}, {{"frames", 3}}}}, {"start_present", target}});
     REQUIRE(played["landed_present"].get<u64>() == target);
     REQUIRE(played["stale_presents"] == json::array({1, 4}));
+    REQUIRE(played["npad_sync"] == true);
+    REQUIRE_THROWS(Core::Nx2Debug::CallTool(
+        system, "input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", "yes"}}));
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
 }
