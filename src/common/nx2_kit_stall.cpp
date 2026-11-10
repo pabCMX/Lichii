@@ -20,7 +20,7 @@
 namespace Common::KitStall {
 namespace {
 
-constexpr size_t MaxThreads = 64;
+constexpr size_t MaxThreads = 256;
 constexpr int MaxDepth = 4;
 
 struct Mark {
@@ -32,6 +32,8 @@ struct Mark {
 
 /// One thread's marks. Only the owner writes them; the watchdog reads them.
 struct Record {
+    /// Claimed by a thread; used once its name is written.
+    std::atomic<bool> claimed{};
     std::atomic<bool> used{};
     std::array<char, 40> name{};
     std::atomic<int> depth{};
@@ -42,13 +44,14 @@ std::array<Record, MaxThreads> records;
 
 std::atomic<int> hooks_enabled{-1};
 
-/// The calling thread's record, claimed on first use and freed when the thread ends.
+/// The calling thread's record, claimed on first use. A record is never reused, so its name is
+/// written once, before it is published, and readers never see it change; a thread's end only
+/// clears its marks. Threads past MaxThreads are not noted.
 struct Owner {
     Record* record{};
     ~Owner() {
         if (record != nullptr) {
             record->depth.store(0, std::memory_order_release);
-            record->used.store(false, std::memory_order_release);
         }
     }
 };
@@ -60,8 +63,8 @@ Record* MyRecord() {
     }
     for (Record& record : records) {
         bool expected = false;
-        if (!record.used.load(std::memory_order_relaxed) &&
-            record.used.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        if (!record.claimed.load(std::memory_order_relaxed) &&
+            record.claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
             char name[32] = "";
 #ifndef _WIN32
             pthread_getname_np(pthread_self(), name, sizeof(name));
@@ -71,6 +74,7 @@ Record* MyRecord() {
             std::memset(record.name.data(), 0, record.name.size());
             std::memcpy(record.name.data(), text.data(), (std::min)(text.size(), record.name.size() - 1));
             record.depth.store(0, std::memory_order_release);
+            record.used.store(true, std::memory_order_release);
             owner.record = &record;
             return owner.record;
         }
@@ -94,6 +98,16 @@ bool HooksEnabled() noexcept {
 
 void SetHooksEnabled(bool enabled) noexcept {
     hooks_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+bool AnyOpen() noexcept {
+    for (const Record& record : records) {
+        if (record.used.load(std::memory_order_acquire) &&
+            record.depth.load(std::memory_order_acquire) > 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 u64 NowNs() noexcept {

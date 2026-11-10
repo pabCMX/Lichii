@@ -48,6 +48,9 @@ struct Stall {
 /// holder of the same lock when another thread holds it.
 [[nodiscard]] std::vector<Stall> Check(u64 limit_ns, u64 now_ns);
 
+/// Whether any thread has a mark open now, whatever its age.
+[[nodiscard]] bool AnyOpen() noexcept;
+
 /// Steady-clock now in ns, the clock of the marks.
 [[nodiscard]] u64 NowNs() noexcept;
 

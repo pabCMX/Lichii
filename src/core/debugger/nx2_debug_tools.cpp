@@ -787,10 +787,10 @@ public:
         Stop();
     }
 
-    /// Starts the thread unless it runs. Call after marking the kit active.
+    /// Starts the thread unless it runs or Stop runs. Call after marking the kit active.
     void Ensure() {
         std::scoped_lock lock{mutex};
-        if (running) {
+        if (running || stopping) {
             return;
         }
         if (thread.joinable()) {
@@ -802,15 +802,18 @@ public:
     }
 
     void Stop() {
-        stop = true;
         std::thread done;
         {
             std::scoped_lock lock{mutex};
+            stopping = true;
+            stop = true;
             done = std::move(thread);
         }
         if (done.joinable()) {
             done.join();
         }
+        std::scoped_lock lock{mutex};
+        stopping = false;
     }
 
 private:
@@ -843,7 +846,9 @@ private:
                     }
                 }
             }
-            if (stalls.empty() && active.empty()) {
+            // Exit only when nothing runs and no breadcrumb is open, so a stall that is still
+            // young when its call ends is still reported.
+            if (stalls.empty() && active.empty() && !Common::KitStall::AnyOpen()) {
                 std::scoped_lock lock{mutex};
                 if (KitActive().empty()) {
                     running = false;
@@ -858,6 +863,7 @@ private:
     std::mutex mutex;
     std::thread thread;
     bool running{};
+    bool stopping{};
     bool first_reported{};
     std::atomic<bool> stop{};
 };
@@ -876,6 +882,10 @@ void RequireKitHooks(std::string_view feature) {
 }
 
 void PresentReply(u64 present);
+
+/// True on the present thread while PresentReply runs its own npad update, so the recorder keeps
+/// only that update's reads as the entry the game reads next.
+thread_local bool in_forced_npad_update = false;
 
 /// g_nx2_present_reply_hook's users (a frame-step replay, a recording in mode "any"): the hook and
 /// the npad update stamps are on only while one runs.
@@ -1356,7 +1366,7 @@ void RecordNpadRead(const HID::EmulatedController& controller, HID::NpadButton h
     if (before != recorder.open->present) {
         return;
     }
-    if (recorder.open->sync_pending) {
+    if (recorder.open->sync_pending && in_forced_npad_update) {
         // The update at this present's reply: keep the values it wrote for the game.
         if (!recorder.open->synced) {
             recorder.open->synced = HID::InjectedInput{};
@@ -1389,7 +1399,9 @@ void PresentReply(u64 present) {
     const bool replay_sync = NoteReplayReply(present);
     const bool record_sync = RecordingWantsSync(present);
     if (replay_sync || record_sync) {
+        in_forced_npad_update = true;
         static_cast<void>(::Service::HID::UpdateNpadNow());
+        in_forced_npad_update = false;
     }
     RecordPresentReply(present);
 }
