@@ -1,7 +1,7 @@
 # Trainer kit: time control and live switches
 
 The trainer kit adds debug-server methods that a practice panel (like a speedrun trainer) needs:
-pause and step the game, slow it down or freeze its world, and flip diagnostic switches while it
+pause and step the game, slow it down (to 1/100, nearly frozen), and flip diagnostic switches while it
 runs. It is on `explore/trainer-kit` (a Base plus these commits). It joins the harness kit only
 after a test-PC A/B of the Base against Base + kit shows no speed change.
 
@@ -28,12 +28,23 @@ All need a running game except `switches`.
 **`pause`** `{timeout_s?}`, **`resume`** `{timeout_s?}`. They return `{paused, changed, presents}`.
 The frontend does the change; the method waits until `System::IsPaused` agrees (default 5 s).
 
-**`step_frames`** `{frames, timeout_s?}`, 1 to 600 frames. It pauses if the game runs, resumes,
-waits until the guest present count grew by `frames`, and pauses again on every path (also on a
-timeout or a lost client). It returns `{requested, advanced, complete, paused, presents}`.
-It is present-granular: the pause lands a present or two late (`advanced` can exceed
-`requested`), and the GPU drains a frame behind the CPU. Use `capture_frame` for an exact frame.
-While the game is paused, `screenshot` waits for a present and fails.
+**`step_frames`** `{frames, capture?, timeout_s?}`, 1 to 600 frames. It pauses if the game runs,
+resumes, waits until the guest present count grew by `frames`, and pauses again on every path
+(also on a timeout or a lost client). It returns `{requested, advanced, complete, paused,
+presents}`. It is present-granular: the pause lands a present or two late (`advanced` can exceed
+`requested`), and the GPU drains a frame behind the CPU.
+
+`capture: true` (or the `capture_frame` params, such as `{sampled: true}`) captures the frame of
+the last stepped present. It steps `frames - 1` presents, pauses, waits 100 ms for the GPU to
+finish the frames queued before the pause, requests the capture while the game is paused, then
+steps the last present alone. The capture therefore takes that present's frame, and the reply adds
+`capture` (as `capture_frame` answers) and `capture_present`. If the last step does not present
+within the timeout, the request is withdrawn and the call fails, so no later frame is captured.
+
+While the game is paused, `capture_frame` and `screenshot` fail at once ("paused: ... needs a
+present"). Before, they waited 5 s for a present and left their request pending; a pending
+screenshot then refused every later one. Use `step_frames {frames: 1, capture: true}` for the
+paused frame.
 
 **`time_control`** `{mode?, value?}`. Ocarina only, and only when the game booted with
 `EDEN_NX2_OOT_TIME_CONTROL=1`. Modes:
@@ -41,13 +52,38 @@ While the game is paused, `screenshot` waits for a present and fails.
 | mode | value | step the game gets each frame |
 |---|---|---|
 | `off` | none | its own (or the FPS add-on's) |
-| `scale` | 0 to 4 | its own step times `value` |
-| `fixed` | 0 to 6 | `value`, whatever the frame time |
+| `scale` | 0.01 to 4 | its own step times `value` |
+| `fixed` | 0.01 to 6 | `value / 60` s of game time, whatever the frame time |
 
-Without `mode` it only reports. It returns `{address, mode, value?, previous}`. The step is in
-1/60-s ticks: 1.0 is one 60 Hz tick, 6.0 is FPS Unlock's largest step (a 100 ms frame).
-`fixed 1.0` with FPS Unlock gives the same step every frame, as with both add-ons off.
-`fixed 0` is the frozen world that still renders, if the game accepts it.
+Without `mode` it only reports. It returns `{address, mode, value?, previous}`.
+
+Units. The game's step is not a plain time. It is in ticks of `s1` Hz, where `s1` is 30 or 60 and
+differs between callers: the original is `s1 / s0` (`s0` the frame-rate field), and FPS Unlock
+returns seconds × `s1`. `scale` multiplies whatever the game computed, so every caller keeps its
+ratio. `fixed N` gives each caller `N × s1 / 60`, that is N/60 s of game time per frame in its own
+unit. `fixed 1`, `2`, `3` and `6` are the steps FPS Unlock gives at 60, 30, 20 and 10 FPS; they
+are the steps the game already takes in real play.
+
+The first live test (2026-11-10, v1.0.0a-20261109-11) found the first version of `fixed` broken:
+it gave every caller the same N, ignoring `s1`. With `s1` = 60, fixed 0.5 was half speed; with
+`s1` = 30, 0.5 was the normal step. Systems timed on different bases then ran at different
+relative speeds: presents fell to 14 per second, then the log showed unmapped reads. `scale`
+worked down to 0.01.
+
+No true freeze. A step of 0 hangs the game: with `fixed 0` no frame was presented, and `off` did
+not bring presents back. Both modes therefore refuse values below 0.01 (the smallest live-tested
+scale). The panel's "Freeze" preset is `scale 0.01`, 100 times slower: the world nearly stands
+still and the game still renders. `off` always returns to the game's own step. A game that already
+hung cannot be recovered by any mode.
+
+**Benchmark mode: `fixed 2`.** Every frame advances the game by 1/30 s, as in real play at 30
+FPS, whatever the host's speed: a slow host renders the same game frames, only slower. With both
+FPS add-ons off, a recorded clip then has the same game load per frame on every host as in the
+owner's real play at 30 FPS, and replays are not affected by the host's frame rate. If the live
+ladder below passes, this is the recommended setting for benchmark recordings and runs. A clip
+recorded at `fixed 2` must be replayed at `fixed 2`: set the mode and value before the load whose
+anchor the clip starts from, and keep it until the clip ends. In another mode the same inputs
+land on other game frames.
 
 **`switches`** `{set?: {name: bool, ...}}`. Lists the live switches as
 `{name, env, class, on}`; `set` flips them first. An unknown name or a value that is not a
@@ -88,12 +124,15 @@ scale:   adrp x10, 0x4E9F000
          ret
 1:       cmp  w11, #2
          b.ne done
-         fmov s8, s3               ; fixed
+         ldr  s2, inv60            ; fixed: value * s1 / 60, in the caller's s1-Hz units
+         fmul s3, s3, s1
+         fmul s8, s3, s2
 done:    ret
 magic:   .word 0x524E5254          ; "TRNR"
+inv60:   .float 0.016666668
 ```
 
-Assembled with `clang --target=aarch64-linux-gnu`. It clobbers x10 to x12, s3 and the flags,
+Assembled with `clang --target=aarch64-linux-gnu` (108 bytes). It reads s1 and keeps it. It clobbers x10 to x12, s2, s3 and the flags,
 which the add-on routines already clobber at this hook (`docs/nx2/ocarina-dynamic-fps.md`), and
 x30, which the hook's `bl` already clobbers. It saves x30 on the stack around the nested call.
 Because it checks the add-on routine at run time, it works with FPS Unlock, Dynamic FPS, or
@@ -209,19 +248,30 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
    the block: stop and report.
 3. `pause`: the Qt menu shows paused, `status.paused` is true. `resume`: both clear.
 4. `step_frames {frames: 1}` ten times: each `advanced` is 1 to 3, the game is paused after
-   each, a `capture_frame` afterwards shows the expected frame.
+   each. Then `step_frames {frames: 1, capture: true}` five times: each answers at once with a
+   `capture` whose files exist, and the game is paused after each. A plain `capture_frame` or
+   `screenshot` while paused fails at once with "paused: ... needs a present".
 5. `time_control {mode: "scale", value: 0.5}`: Link walks at half speed. `value: 2`: double.
    `off`: normal.
-6. Safe minimum: `scale` 0.25, 0.1, 0.05, 0.02, 0.01, then `fixed` 0.5, 0.1, 0.01, 0. Hold each
-   for 30 s while walking and opening the menu. Record the lowest value that neither crashes nor
-   hangs, and whether `fixed 0` freezes the world while the camera still moves.
-7. With FPS Unlock on, `fixed 1.0`: game speed follows the frame rate (slower below 60 fps), as
-   with both add-ons off.
-8. Note which things do not slow down with the step (audio, cutscene video, water ripples below
+6. Whole fixed steps FIRST, from a fresh boot, both FPS add-ons off: `fixed 1`, `fixed 2`,
+   `fixed 3`, each held 30 s while walking and turning the camera, then `off`. After each hold
+   and after `off`, search the log for `Unmapped` lines (`log_tail {contains: "Unmapped"}`): there
+   must be none. Record presents/s per hold. Expected: `fixed 1` as the game's own speed at 60
+   FPS, `fixed 2` as real play at 30 FPS, `fixed 3` as at 20 FPS. Any unmapped line ends the
+   ladder; that boot proves nothing more.
+7. Then fractional steps, each from a fresh boot after a clean whole-step ladder: `fixed 0.5`,
+   `0.1`, `0.01`, then `scale` 0.25, 0.1, 0.01, each 30 s with walking and camera, then `off`, with
+   the same `Unmapped` check. `fixed 0` and anything below 0.01 must be refused by the server.
+8. With FPS Unlock on, `fixed 2`: game speed follows the frame rate (game time 1/30 s per frame),
+   as with both add-ons off.
+9. Benchmark mode: record a clip with `fixed 2` set before the save load, replay it 3 times with
+   `fixed 2` set before the load anchor. It must reach the owner's end point as a clip recorded
+   and replayed in `off` does.
+10. Note which things do not slow down with the step (audio, cutscene video, water ripples below
    1.0, UI animation).
-9. Live switch: `switches {set: {ipc_summary: true}}`; the log shows the IPC summary every 5 s;
+11. Live switch: `switches {set: {ipc_summary: true}}`; the log shows the IPC summary every 5 s;
    `false` stops it. Then `ipc_trace` (one line per service command) on and off.
-10. Speed: with the variable unset and no trainer calls, the Base + kit build matches the Base
+12. Speed: with the variable unset and no trainer calls, the Base + kit build matches the Base
     within run-to-run noise on the standard route (the ship condition).
 
 ## Open risks
