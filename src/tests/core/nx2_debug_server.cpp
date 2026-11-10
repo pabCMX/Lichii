@@ -622,6 +622,7 @@ TEST_CASE("Debug input answers as before unless the client asks for ms or measur
 
     const json measured = call("input", {{"buttons", {"A"}}, {"frames", 3}, {"measure", true}});
     REQUIRE(measured["frames"] == 3);
+    REQUIRE(measured["landed_present"] == measured["first_present"]);
     REQUIRE(measured["measurement"]["supported"] == "held-input-v1");
     REQUIRE(measured["measurement"]["complete"] == true);
     REQUIRE(measured["measurement"]["intervals_ms"].size() == 2);
@@ -821,6 +822,40 @@ TEST_CASE("Debug input recordings replay the input the game was given at each pr
     const json first = check_round_trip(script);
     // Replaying the recording gives the game the same input at the same present offsets.
     static_cast<void>(check_round_trip(first["steps"]));
+
+    // start_present puts step 0 at exactly that present, and the reply says where it landed.
+    const auto refused = [&](const json& params) -> std::string {
+        try {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_sequence", params));
+        } catch (const std::runtime_error& error) {
+            return error.what();
+        }
+        return {};
+    };
+    const u64 passed = Core::g_nx2_present_count.load();
+    REQUIRE(refused({{"steps", script}, {"start_present", passed}}).starts_with("start_present"));
+    REQUIRE(refused({{"steps", {{{"ms", 5}}}}, {"start_present", passed + 100}})
+                .starts_with("start_present needs frame steps"));
+    const u64 recording_start = record("start")["start_present"].get<u64>();
+    const u64 target = Core::g_nx2_present_count.load() + 50;
+    const json aimed = Core::Nx2Debug::CallTool(
+        system, "input_sequence", {{"steps", script}, {"start_present", target}, {"measure", true}});
+    const json aimed_recording = record("stop");
+    const auto wanted = per_present(script);
+    REQUIRE(aimed["first_present"].get<u64>() == target);
+    REQUIRE(aimed["landed_present"].get<u64>() == target);
+    REQUIRE(aimed["measurement"]["first_present"].get<u64>() == target);
+    REQUIRE(aimed["measurement"]["last_present"].get<u64>() == target + wanted.size() - 1);
+    const auto aimed_inputs = per_present(aimed_recording["steps"]);
+    const u64 offset = target - recording_start;
+    REQUIRE(offset + wanted.size() <= aimed_inputs.size());
+    REQUIRE(aimed_inputs[offset - 1].buttons == Core::HID::NpadButton::None);
+    for (u64 index = 0; index < wanted.size(); ++index) {
+        if (!same(aimed_inputs[offset + index], wanted[index])) {
+            CAPTURE(index, target, recording_start);
+            FAIL("input aimed at start_present differs at a present");
+        }
+    }
 
     // The owner's pad may drive the handheld npad while player 1 is connected and idle: the game
     // reads both, so the recording holds both.
