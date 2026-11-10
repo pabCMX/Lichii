@@ -540,7 +540,8 @@ TEST_CASE("Debug timed input steps bound ms and never count presents", "[core][n
 
 namespace {
 
-/// Stamps a present every 2 ms, like the GPU thread at 500 fps, until it is destroyed.
+/// Stamps a present every 2 ms, like the GPU thread at 500 fps, and calls the present hook as
+/// nx2_gsv.h does, until it is destroyed.
 class FakePresenter {
 public:
     FakePresenter()
@@ -551,6 +552,9 @@ public:
                       std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now().time_since_epoch())
                           .count();
+                  if (const auto hook = Core::g_nx2_present_hook.load()) {
+                      hook(present);
+                  }
                   std::this_thread::sleep_for(2ms);
               }
           }} {}
@@ -655,4 +659,148 @@ TEST_CASE("Injected input merges buttons and replaces sticks while installed", "
     controller.SetInputInjector({});
     REQUIRE(controller.GetNpadButtons().raw == None);
     REQUIRE(controller.GetSticks().left.x == 0);
+}
+
+TEST_CASE("Input recordings merge equal presents and stop at their limits",
+          "[core][nx2_debug_server]") {
+    using Core::HID::AnalogStickState;
+    const Core::HID::InjectedInput a{.buttons = Core::HID::NpadButton::A,
+                                     .left = AnalogStickState{}, .right = AnalogStickState{}};
+    Core::HID::InjectedInput b = a;
+    b.left = AnalogStickState{.x = 100, .y = -100};
+    Core::Nx2Debug::InputRecording recording{10, 6, 2};
+    REQUIRE(recording.Add(9, b));
+    REQUIRE(recording.Add(10, a));
+    REQUIRE(recording.Add(11, a));
+    REQUIRE(recording.Add(11, b));
+    // Present 12 was skipped: it gets the input of 13.
+    REQUIRE(recording.Add(13, b));
+    REQUIRE(recording.Presents() == 4);
+    REQUIRE(recording.Steps().size() == 2);
+    REQUIRE(recording.Steps()[0].frames == 2);
+    REQUIRE(recording.Steps()[0].input.left->x == 0);
+    REQUIRE(recording.Steps()[1].frames == 2);
+    REQUIRE(recording.Steps()[1].input.left->x == 100);
+    REQUIRE_FALSE(recording.Add(14, a));
+    REQUIRE(recording.Truncated());
+    REQUIRE(recording.Presents() == 4);
+
+    Core::Nx2Debug::InputRecording short_recording{1, 3, 10};
+    REQUIRE(short_recording.Add(1, a));
+    REQUIRE_FALSE(short_recording.Add(5, a));
+    REQUIRE(short_recording.Truncated());
+    REQUIRE(short_recording.Presents() == 3);
+    REQUIRE(short_recording.Steps()[0].frames == 3);
+}
+
+TEST_CASE("Recorded input steps parse back to the same input", "[core][nx2_debug_server]") {
+    using Core::HID::AnalogStickState;
+    using Core::HID::HID_JOYSTICK_MAX;
+    REQUIRE(Core::Nx2Debug::InputStepJson({.input = {}, .frames = 4}) == json{{"frames", 4}});
+    for (s32 x = -HID_JOYSTICK_MAX; x <= HID_JOYSTICK_MAX; ++x) {
+        const Core::Nx2Debug::InputStep step{
+            .input = {.buttons = Core::HID::NpadButton::L | Core::HID::NpadButton::StickR,
+                      .left = AnalogStickState{.x = x, .y = -x},
+                      .right = AnalogStickState{.x = 0, .y = x}},
+            .frames = 7};
+        const json text = Core::Nx2Debug::InputStepJson(step);
+        const auto back = Core::Nx2Debug::ParseInputStep(text);
+        if (back.frames != 7 || back.input.buttons != step.input.buttons ||
+            back.input.left->x != x || back.input.left->y != -x || back.input.right->x != 0 ||
+            back.input.right->y != x) {
+            CAPTURE(x, text.dump());
+            FAIL("recorded step does not parse back");
+        }
+    }
+}
+
+TEST_CASE("Debug input recordings replay the input the game was given at each present",
+          "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    const auto old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        if (Core::g_nx2_present_hook.load() != nullptr) {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}}));
+        }
+        Core::g_nx2_present_count = old_count;
+        for (auto& timestamp : Core::g_nx2_present_times_ns) {
+            timestamp = 0;
+        }
+    };
+    const auto record = [&system](std::string_view action) {
+        return Core::Nx2Debug::CallTool(system, "input_record", {{"action", action}});
+    };
+    REQUIRE_THROWS(record("stop"));
+    REQUIRE(record("status") == json{{"recording", false}});
+    REQUIRE_THROWS(record("pause"));
+
+    FakePresenter presenter;
+    // The game's input at each present of steps; a step without a stick leaves the owner's
+    // stick, which is centred here.
+    const auto per_present = [](const json& steps) {
+        std::vector<Core::HID::InjectedInput> inputs;
+        for (const json& step : steps) {
+            auto parsed = Core::Nx2Debug::ParseInputStep(step);
+            parsed.input.left = parsed.input.left.value_or(Core::HID::AnalogStickState{});
+            parsed.input.right = parsed.input.right.value_or(Core::HID::AnalogStickState{});
+            inputs.insert(inputs.end(), parsed.frames, parsed.input);
+        }
+        return inputs;
+    };
+    const auto same = [](const Core::HID::InjectedInput& a, const Core::HID::InjectedInput& b) {
+        return a.buttons == b.buttons && a.left->x == b.left->x && a.left->y == b.left->y &&
+               a.right->x == b.right->x && a.right->y == b.right->y;
+    };
+    // Plays steps while recording. The recording holds the steps' input from the replay's first
+    // present on, and the owner's idle pad before and after.
+    const auto check_round_trip = [&](const json& steps) {
+        const json started = record("start");
+        REQUIRE(started["recording"] == true);
+        REQUIRE(started["controller"] == "player1");
+        REQUIRE_THROWS(record("start"));
+        const json played = Core::Nx2Debug::CallTool(system, "input_sequence", {{"steps", steps}});
+        REQUIRE(record("status")["recording"] == true);
+        const json recorded = record("stop");
+        REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
+        REQUIRE(recorded["truncated"] == false);
+        REQUIRE(recorded["controller"] == "player1");
+
+        const auto wanted = per_present(steps);
+        const auto got = per_present(recorded["steps"]);
+        const u64 start = recorded["start_present"].get<u64>();
+        const u64 first = played["first_present"].get<u64>();
+        REQUIRE(start == started["start_present"].get<u64>());
+        REQUIRE(got.size() == recorded["presents"].get<u64>());
+        REQUIRE(recorded["end_present"].get<u64>() == start + got.size() - 1);
+        REQUIRE(first >= start);
+        REQUIRE(first - start + wanted.size() <= got.size());
+        const Core::HID::InjectedInput idle{.buttons = {}, .left = Core::HID::AnalogStickState{},
+                                            .right = Core::HID::AnalogStickState{}};
+        for (u64 index = 0; index < got.size(); ++index) {
+            const u64 offset = index - (first - start);
+            const bool in_steps = index >= first - start && offset < wanted.size();
+            if (!same(got[index], in_steps ? wanted[offset] : idle)) {
+                CAPTURE(index, start, first);
+                FAIL("recorded input differs at a present");
+            }
+        }
+        return recorded;
+    };
+    const json script = {
+        {{"buttons", {"A"}}, {"frames", 3}},
+        {{"left_stick", {1.0, -0.5}}, {"frames", 2}},
+        {{"buttons", {"B", "ZR"}},
+         {"left_stick", {-0.25, 0.75}},
+         {"right_stick", {0.5, 0.5}},
+         {"frames", 4}},
+        {{"frames", 1}},
+        {{"buttons", {"Up"}}, {"right_stick", {-1.0, 0.3}}, {"frames", 2}},
+    };
+    const json first = check_round_trip(script);
+    // Replaying the recording gives the game the same input at the same present offsets.
+    static_cast<void>(check_round_trip(first["steps"]));
 }
