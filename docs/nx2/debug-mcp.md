@@ -322,7 +322,7 @@ How the reads are safe:
 **`input`** `{buttons?, left_stick?, right_stick?, frames, timeout_s?, measure?}` holds the buttons and
 sticks for `frames` presented frames and then releases them. It returns when they are done.
 **`input_sequence`** `{steps: [{buttons?, left_stick?, right_stick?, frames}, ...], timeout_s?, measure?}`
-runs the steps back to back, at most 1000 steps and 36000 frames per call. A step with no
+runs the steps back to back, at most 6000 steps and 36000 frames per call. A step with no
 buttons and no sticks injects nothing, so it works as a pause between moves.
 
 - **Buttons** are `A B X Y L R ZL ZR Plus Minus Up Down Left Right StickL StickR` (the
@@ -355,7 +355,7 @@ steps follow host `steady_clock` time from the moment the injector is installed,
 advance by elapsed time: with present-counted steps such a game moves further when frames are
 slower (OOT moved Link visibly less in a run whose 90 held presents took 4.33 s instead of
 4.93 s). A timed result reports `clock: "host_time"`, `ms`, and as `frames` the presents that
-began inside the window except the last; `measure` then covers those presents (2 to 2048),
+began inside the window except the last; `measure` then covers those presents (2 to 3840),
 otherwise the measurement is marked incomplete. Timed input still quantizes to the game's own
 input reads, so it narrows run-to-run drift but is not a frame-exact replay.
 Host time continues during pauses and hangs; completion of a timed call does not prove the
@@ -376,7 +376,7 @@ transport gives every handler a `ClientGone` probe, a non-blocking peek at the r
 (`nx2_debug_server.cpp`), which the wait polls every 2 ms. The adapter waits as long as the
 emulator's default timeout, so it does not drop a long sequence early.
 
-With `measure: true`, input calls are limited to 2048 presents and additionally return
+With `measure: true`, input calls are limited to 3840 presents and additionally return
 `measurement.supported: "held-input-v1"`. For `first_present = start` and `frames = total`,
 only timestamps `start..start+total-1` are used; the response waits for counter
 `>= start+total`. There are exactly `total-1` intervals (zero for one present).
@@ -393,6 +393,64 @@ wall-time route measurement. These are host guest-present timestamps, not GPU ex
 Use it when the owner has put the controller down: injected buttons add to whatever the owner
 presses. For an A/B test, run the same `input_sequence` from the same spot under each variant
 (for example with a `reject_shaders` change in between), then compare screenshots or captures.
+
+### Input recording (implemented)
+
+**`input_record`** `{action: "start" | "status" | "stop"}` records the input the game is given
+at each present, so that `input_sequence` can replay it present for present. The frontend TAS
+recorder steps once per frame shown in the window (`GRenderWindow::OnFrameDisplayed`), not once
+per game present, so its clips drift when replayed with `input_sequence` (H48).
+
+| Action | Result |
+| --- | --- |
+| `start` | `{recording: true, start_present, controller}`. Fails while a recording runs. |
+| `status` | `{recording: false}`, or `{recording: true, start_present, presents, steps, controller, truncated}`, where `steps` is a count. |
+| `stop` | `{steps: [...], presents, start_present, end_present, controller, truncated}`. Fails when nothing records. |
+
+- `controller` is `player1`, or `handheld` when player 1 is not connected: the same choice
+  `input` makes, made once at `start`.
+- `start_present` is `g_nx2_present_count + 1` at `start`, the next present.
+  `end_present = start_present + presents - 1`. With `presents: 0`, `steps` is empty.
+- `steps` are frame steps in the `input_sequence` format, run-length encoded. They sum to
+  `presents` frames. Each step has `left_stick` and `right_stick`, also when centred, and
+  `buttons` when any of the 16 input buttons are held. Stick values have five decimals, which
+  `ParseInputStep` rounds back to the exact recorded value.
+- Pass `steps` to **`input_sequence`** (not `input`, which takes one step). The step at offset k
+  of the recording plays at offset k of the replay: the game gets the recorded input of present
+  `start_present + k` at present `first_present + k` of the replay.
+
+Where it samples: `g_nx2_present_hook` is set only while recording. nx2:vi2 229
+(`src/core/hle/service/nx2_gsv.h`) calls it right after it counts present c, on the present
+thread. It reads `GetNpadButtons` and `GetSticks` of the controller, the getters the npad
+updater reads every 1 ms. The injector also answers them by the present count, so for a replay
+the input read at present c is exactly what the game gets during count c. For the owner's own
+pad it is the state at the moment of present c. A press that starts later during count c shows
+from present c + 1 in the recording. When not recording, the cost is one atomic load per present.
+
+What is kept: the 16 input buttons and both sticks, after turbo and after any injected input.
+Stick direction bits (`StickL*`, `StickR*`) are not kept: the replay derives them from the
+recorded sticks, with the same half-scale threshold. Other buttons (Home, Capture, SL, SR) are
+not kept.
+
+Replay notes:
+
+- The replay sets both sticks at every present, so a recorded clip replaces the owner's sticks.
+  Injected buttons are still ORed into the owner's, so leave the pad alone during a replay.
+- The game gets the same input at the same present offsets. It reaches the same positions only
+  if each present advances the game by the same step, for example with the game's FPS add-ons
+  off. A game that moves by elapsed time drifts with frame times (see "Input").
+- One call replays at most 6000 steps and 36000 frames. A recording stops adding presents when
+  either limit is reached and reports `truncated: true`; `stop` then returns what it has. 6000
+  steps cover 100 s of a stick that moves at every present at 60 presents/s. A 6000-step
+  request with both sticks and two buttons per step is about 0.7 MB of the 1 MB request limit.
+- `measure: true` covers at most 3840 presents (64 s at 60 presents/s): the present-time ring
+  has 4096 slots, less 256 of margin.
+
+Threading: the hook, the handler and shutdown share one mutex. A recording is not tied to a
+client connection, so `start` and `stop` can come from different calls. A client that leaves
+mid-recording leaves it running until the limits, and the next `stop` ends it. When the game
+shuts down, `Service` discards the recording after the server thread has stopped, so the
+present path no longer reads the controller.
 
 ### Phase 2: control and input (about 4 to 5 days)
 
