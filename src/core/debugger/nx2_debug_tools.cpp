@@ -1876,14 +1876,20 @@ InputStep ParseInputStep(const json& step) {
     }
     if (step.contains("ms")) {
         const json& ms = step.at("ms");
-        if (!ms.is_number_integer() || ms.get<s64>() < 1 || ms.get<u64>() > MAX_INPUT_MS) {
+        if (!ms.is_number_integer()) {
+            throw std::runtime_error{fmt::format("ms must be a whole number, 1 to {} (got {})", MAX_INPUT_MS, ms.dump())};
+        }
+        if (ms.get<s64>() < 1 || ms.get<u64>() > MAX_INPUT_MS) {
             throw std::runtime_error{fmt::format("ms must be 1 to {}", MAX_INPUT_MS)};
         }
         result.ms = ms.get<u64>();
     } else {
         const json& frames = step.at("frames");
-        if (!frames.is_number_integer() || frames.get<s64>() < 1 ||
-            frames.get<u64>() > MAX_INPUT_FRAMES) {
+        if (!frames.is_number_integer()) {
+            throw std::runtime_error{fmt::format("frames must be a whole number, 1 to {} (got {})",
+                                                 MAX_INPUT_FRAMES, frames.dump())};
+        }
+        if (frames.get<s64>() < 1 || frames.get<u64>() > MAX_INPUT_FRAMES) {
             throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_INPUT_FRAMES)};
         }
         result.frames = frames.get<u64>();

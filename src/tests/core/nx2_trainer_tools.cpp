@@ -144,6 +144,7 @@ TEST_CASE("pause, resume and step_frames drive the frontend's run control", "[nx
     for (const json& bad : {json{{"frames", 0}}, json{{"frames", 601}}, json{{"frames", "1"}}}) {
         REQUIRE_THROWS_WITH(call("step_frames", bad), ContainsSubstring("frames must be"));
     }
+    REQUIRE_THROWS_WITH(call("step_frames", json{{"frames", 1.5}}), ContainsSubstring("a whole number"));
 }
 
 TEST_CASE("step_frames with capture records the last stepped present, as the frame dump schedules it",
@@ -276,15 +277,17 @@ TEST_CASE("time_control checks its mode and value and needs the patch", "[nx2_tr
     };
     REQUIRE_THROWS_WITH(call({{"mode", "slow"}}), ContainsSubstring("unknown mode"));
     REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 4.5}}),
-                        ContainsSubstring("scale value must be 0.01 to 4"));
+                        ContainsSubstring("scale value must be 0.5 to 4"));
     REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", -0.1}}),
-                        ContainsSubstring("fixed value must be 0.01 to 6"));
-    REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", 0}}), ContainsSubstring("hangs the game"));
-    REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 0.005}}), ContainsSubstring("0.01 to 4"));
+                        ContainsSubstring("fixed value must be 0.5 to 6"));
+    REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", 0}}), ContainsSubstring("hangs it"));
+    // T9: scale 0.1 and 0.01 broke the game when left; only values tested both ways are taken.
+    REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 0.1}}), ContainsSubstring("0.5 to 4"));
+    REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 0.01}}), ContainsSubstring("left scale 0.1 or 0.01"));
     REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", "1"}}),
                         ContainsSubstring("fixed value must be"));
     REQUIRE_THROWS(call({{"mode", "scale"}}));
-    REQUIRE_THROWS_WITH(call({{"trace", -1}}), ContainsSubstring("trace is the presents to trace, 1 to 36000"));
+    REQUIRE_THROWS_WITH(call({{"trace", -1}}), ContainsSubstring("trace is the presents to trace, a whole number, 1 to 36000"));
     REQUIRE_THROWS_WITH(call({{"trace", 36001}}), ContainsSubstring("1 to 36000"));
     REQUIRE_THROWS_WITH(call({{"trace", 2.5}}), ContainsSubstring("or 0 to stop"));
     // The first Publish takes what an earlier Apply in this process left pending, the second clears.
@@ -344,4 +347,24 @@ TEST_CASE("The step trace stamps calls with their present and sums them up", "[n
     REQUIRE(summary["records"][0] == json{100, 60.0f, 60.0f, 1.0f, 1.0f});
     REQUIRE(summary["records"][9] == json{103, 30.0f, 60.0f, 0.5f, 0.25f});
     REQUIRE_FALSE(trace.Summary(false).contains("records"));
+}
+
+TEST_CASE("time_control ramps a speed-up over 2x by doublings, one a present", "[nx2_trainer]") {
+    using Core::Nx2Debug::TimeRamp;
+    REQUIRE(TimeRamp(1.0f, 6.0f) == std::vector<float>{2.0f, 4.0f}); // off -> fixed 6: 2, 4, then 6
+    REQUIRE(TimeRamp(0.5f, 6.0f) == std::vector<float>{1.0f, 2.0f, 4.0f});
+    REQUIRE(TimeRamp(0.5f, 1.0f).empty()); // scale 0.5 -> off: 2x, tested clean
+    REQUIRE(TimeRamp(1.0f, 2.0f).empty());
+    REQUIRE(TimeRamp(6.0f, 0.5f).empty()); // slowing down is never ramped
+    // The T9 failure, a jump from scale 0.01 to off, would go through six stages, then off.
+    REQUIRE(TimeRamp(0.01f, 1.0f).size() == 6);
+    for (const auto& [from, to] : {std::pair{0.01f, 1.0f}, {0.5f, 6.0f}, {0.7f, 4.0f}}) {
+        float last = from;
+        for (const float stage : TimeRamp(from, to)) {
+            REQUIRE(stage <= last * Core::Nx2Debug::TIME_RAMP_FACTOR * 1.0001f);
+            last = stage;
+        }
+        REQUIRE(to <= last * Core::Nx2Debug::TIME_RAMP_FACTOR * 1.0001f);
+    }
+    REQUIRE(TimeRamp(0.0f, 1.0f).empty()); // no earlier speed: nothing to ramp from
 }

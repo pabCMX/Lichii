@@ -63,6 +63,15 @@ struct RunState {
 void AddTrainerHandlers(Handlers& handlers, System& system, RunState run,
                         std::function<bool()> stopping, CaptureStart capture = {});
 
+/// time_control raises the game's speed by at most this factor per present.
+constexpr float TIME_RAMP_FACTOR = 2.0f;
+
+/// The stages time_control writes, one per present, before it sets a speed `to` from a speed
+/// `from` (off 1, scale and fixed their value): doublings of `from` while `to` is more than
+/// TIME_RAMP_FACTOR above the stage before. Empty when the change is not faster by more than
+/// that. Leaving scale 0.1 or 0.01 for off in one frame broke the game (HTPC, 2026-11-10).
+[[nodiscard]] std::vector<float> TimeRamp(float from, float to);
+
 /// The host side of the time_control step trace (docs/nx2/trainer-kit.md, "Step trace"). At each
 /// present the present hook gives Add the guest trace area (OotTimeControl::TraceSize bytes:
 /// magic, count, then the last 8 calls); Add keeps the calls made since the previous present,
