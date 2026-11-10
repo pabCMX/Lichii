@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/logging.h"
+#include "common/nx2_kit_stall.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -96,6 +97,7 @@ bool UpdateNpadNow() {
     }
     // NPad::OnUpdate takes the npad lock the 1 ms update takes; each entry gets the next
     // sampling number, so the game sees one more normal entry.
+    const Common::KitStall::Scope stall{"npad mutex (wait and update)", "UpdateNpadNow"};
     manager->UpdateNpad({});
     return true;
 }

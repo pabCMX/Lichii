@@ -638,6 +638,42 @@ NCE CPU state, or the GPU caches, and Eden and yuzu never had it. The `saveState
 not a tool. The practical substitute is a reproduction script: phase 2 input sequences, recorded
 once (`EDEN_NX2_KEY_RECORD` already records keys in `eden-cli`) and replayed after boot.
 
+## If the kit hangs
+
+The lab harness kit (`input_record`, `start_present`, `npad_sync`, `luma_watch`, the hotkey) adds
+locks and hooks to the present path, the npad update and the GPU thread. Each of its blocking
+points leaves a breadcrumb (`common/nx2_kit_stall.h`): the thread, the lock, the operation, and
+whether it waits for the lock or holds it, since when. The points are the recorder mutex, the
+replay sync mutex, the injector mutex (`EmulatedController::Injected` and `SetInputInjector`),
+the forced npad update (`UpdateNpadNow`, which waits for and then holds the npad mutex), and the
+luma sample's GPU readback. The present hook, the reply hook, the npad read hook and the server's
+input_record and input calls reach them through these locks. Writing a breadcrumb is two relaxed
+stores, and only these kit paths write them, so a game without a kit call pays nothing.
+
+While a recording, an input call or a luma watch runs, a watchdog thread (`KitWatchdog`) checks
+the breadcrumbs every 250 ms. A wait or hold longer than `EDEN_NX2_KIT_STALL_MS` (default 2000)
+gives ONE Error line (Error lines flush the log), again every 10 s while it lasts:
+
+    KIT STALL: <thread>#<id> has waited 2.3 s for recorder mutex in RecordNpadRead; held by
+    <thread>#<id> in RecordPresent for 2.4 s; present count 51234; active: record injector
+
+Thread names come from the OS (`pthread_getname_np`; on Windows only the id). The first stall
+also calls `KitStall::g_first_stall_hook` when a frontend set it (to write a minidump); nothing
+sets it on the Base. At start the server logs `Debug server kit 2, kit hooks on, features [...]`,
+so every log names the kit the exe has.
+
+`EDEN_NX2_KIT_HOOKS=0` is the kill switch for a clean A/B. The server then installs none of the
+kit's hooks: `input_record`, `luma_watch`, `start_present` and an explicit `npad_sync: true` fail
+with an error that names the variable, frame-step calls run without the reply hook (no
+`npad_sync`, no `stale_presents`), the GPU does not store the composite present, and `features`
+answers `{features: ["input_ms", "measure"], kit, kit_hooks: false}`. Plain `input` and
+`input_sequence` still work: their injector is origin code. One relaunch with it tells whether a
+hang or a slowdown comes from the kit.
+
+What to send to the dev orchestrator: the build name, the log with every `KIT STALL` line and
+the 50 lines before the first one, the `Debug server kit` line, the last harness call (method and
+parameters), and a minidump if the hang stays (see "Host crash" in AGENTS.md).
+
 ## Running it on the PC
 
 1. Build the branch as usual:
