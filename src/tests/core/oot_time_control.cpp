@@ -317,7 +317,7 @@ TEST_CASE("Time control fixed whole steps match FPS Unlock at 60, 30, 20 and 10 
     auto plain = nso;
     REQUIRE(Apply(nso, plain));
     Hook hook{plain};
-    for (const auto [n, fps] : {std::pair{1.0f, 60.0f}, {2.0f, 30.0f}, {3.0f, 20.0f}, {6.0f, 10.0f}}) {
+    for (const auto& [n, fps] : {std::pair{1.0f, 60.0f}, {2.0f, 30.0f}, {3.0f, 20.0f}, {6.0f, 10.0f}}) {
         hook.Set(TC::Mode::Fixed, n);
         for (const float s1 : {60.0f, 30.0f}) {
             REQUIRE_THAT(hook.Run(s1, 60.0f), Catch::Matchers::WithinRel(s1 / fps, 1e-6f));
