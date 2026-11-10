@@ -128,23 +128,22 @@ void TracePresent(u64 present) {
     g_trace.memory = nullptr;
 }
 
-/// Ends a trace's host side without touching guest memory (the session ends; the game may be gone).
-void StopTraceHook() {
+} // Anonymous namespace
+
+void StopStepTrace() {
     std::scoped_lock lock{g_trace.mutex};
     SetPresentReplyTrace(nullptr);
     g_trace.trace.Stop();
     g_trace.memory = nullptr;
 }
 
+namespace {
+
 struct TrainerState {
     System& system;
     RunState run;
     std::function<bool()> stopping;
     CaptureStart capture;
-
-    ~TrainerState() {
-        StopTraceHook();
-    }
 };
 
 /// After a pause, the GPU may still finish the frames queued before it. A capture requested

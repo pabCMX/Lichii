@@ -64,6 +64,11 @@ struct RunState {
 void AddTrainerHandlers(Handlers& handlers, System& system, RunState run,
                         std::function<bool()> stopping, CaptureStart capture = {});
 
+/// Ends the step trace's host side without touching guest memory: the debug server session ends,
+/// and the game may be gone. Not tied to one handler table, because CallTool (the recorder
+/// hotkey) builds and drops its own.
+void StopStepTrace();
+
 /// time_control raises the game's speed by at most this factor per present.
 constexpr float TIME_RAMP_FACTOR = 2.0f;
 
