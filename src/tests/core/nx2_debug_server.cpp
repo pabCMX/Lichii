@@ -758,11 +758,25 @@ TEST_CASE("Debug input recordings replay the input the game was given at each pr
     // Plays steps while recording. The recording holds the steps' input from the replay's first
     // present on, and the owner's idle pad before and after.
     const auto check_round_trip = [&](const json& steps) {
-        const json started = record("start");
-        REQUIRE(started["recording"] == true);
-        REQUIRE(started["controller"] == "player1");
-        REQUIRE_THROWS(record("start"));
-        const json played = Core::Nx2Debug::CallTool(system, "input_sequence", {{"steps", steps}});
+        json started;
+        json played;
+        // Measured input refuses when a present lands while it installs its injector, which
+        // would give its first present the owner's input. Record again in that case.
+        for (int attempt = 1; played.is_null(); ++attempt) {
+            started = record("start");
+            REQUIRE(started["recording"] == true);
+            REQUIRE(started["controller"] == "player1");
+            REQUIRE_THROWS(record("start"));
+            try {
+                played = Core::Nx2Debug::CallTool(system, "input_sequence",
+                                                  {{"steps", steps}, {"measure", true}});
+            } catch (const std::runtime_error& error) {
+                static_cast<void>(record("stop"));
+                if (attempt == 5 || !std::string_view{error.what()}.starts_with("present advanced")) {
+                    throw;
+                }
+            }
+        }
         REQUIRE(record("status")["recording"] == true);
         const json recorded = record("stop");
         REQUIRE(Core::g_nx2_present_hook.load() == nullptr);

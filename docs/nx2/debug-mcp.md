@@ -418,6 +418,9 @@ per game present, so its clips drift when replayed with `input_sequence` (H48).
 - Pass `steps` to **`input_sequence`** (not `input`, which takes one step). The step at offset k
   of the recording plays at offset k of the replay: the game gets the recorded input of present
   `start_present + k` at present `first_present + k` of the replay.
+- Replay with `measure: true`. Without it, a present that lands while the injector is installed
+  gets the owner's input instead of step 0. With it, that call fails with "present advanced
+  while installing input" and releases the input; start the replay again from the save.
 
 Where it samples: `g_nx2_present_hook` is set only while recording. nx2:vi2 229
 (`src/core/hle/service/nx2_gsv.h`) calls it right after it counts present c, on the present
@@ -443,6 +446,7 @@ Replay notes:
   either limit is reached and reports `truncated: true`; `stop` then returns what it has. 6000
   steps cover 100 s of a stick that moves at every present at 60 presents/s. A 6000-step
   request with both sticks and two buttons per step is about 0.7 MB of the 1 MB request limit.
+  Steps that hold many buttons at once are longer: check the request size before a long replay.
 - `measure: true` covers at most 3840 presents (64 s at 60 presents/s): the present-time ring
   has 4096 slots, less 256 of margin.
 
