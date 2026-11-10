@@ -18,11 +18,14 @@ Branch `base/Base-0ab7736df9-20261109-0905`, cut 2026-11-09 09:05 US Eastern.
 
 ## What the kit adds
 
-Only two debug-server parameters, both in `src/core/debugger/nx2_debug_tools.cpp`:
+Two debug-server parameters and one method, all in `src/core/debugger/nx2_debug_tools.cpp`:
 
 - `input` and `input_sequence` steps can give `ms` instead of `frames`. Timed steps follow host
   time. The response then has `clock: "host_time"` and `ms`.
 - `measure: true` adds `measurement`: the present intervals of the held input.
+- `input_record` records the game's input once per present, as steps `input_sequence` replays
+  (H48). It adds `g_nx2_present_hook` to the present path and raises the limits to 6000 steps
+  per call and 3840 measured presents.
 
 Both are described in [debug-mcp.md](debug-mcp.md) under "Input". Without `ms` or `measure`,
 nothing changes: the input injector (`EmulatedController::SetInputInjector`) is the origin code,
