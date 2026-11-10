@@ -148,9 +148,11 @@ json Resume(TrainerState& state, const json& params, const ClientGone& client_go
 }
 
 // Resumes until `frames` more guest presents, then pauses again. Present-granular: the pause
-// lands a present or two late, and the GPU drains a frame behind the CPU. With capture, the last
-// present is stepped on its own: the capture is requested while the game is paused and the GPU
-// has drained, so it takes the frame of exactly that present.
+// lands a present or two late, and the GPU drains a frame behind the CPU. With capture, the
+// capture is requested while the game is paused and the GPU has drained, with two presents left:
+// the frame end of the first takes the request and arms the frame dump (RasterizerVulkan::
+// TickFrame), which records the next frame, the last present stepped. So a capture steps at least
+// two presents, and frames: 1 with capture advances 2 and captures the frame the game stops on.
 json StepFrames(TrainerState& state, const json& params, const ClientGone& client_gone) {
     RequireGame(state);
     const json& value = params.at("frames");
@@ -183,14 +185,15 @@ json StepFrames(TrainerState& state, const json& params, const ClientGone& clien
         SetRunning(state, false, [] { return false; }, 5s);
         return done;
     };
-    bool complete = !capturing || frames == 1 ? true : step(frames - 1);
+    const u64 total = capturing ? (std::max<u64>)(frames, 2) : frames;
+    bool complete = !capturing || total == 2 ? true : step(total - 2);
     json result;
     if (capturing && complete) {
         std::this_thread::sleep_for(GPU_DRAIN);
         const u64 before = Presents();
         const auto end = state.capture(capture.is_object() ? capture : json::object());
         try {
-            complete = step(1);
+            complete = step(2);
         } catch (const std::exception&) {
             end(true); // no capture of a later frame
             throw;
@@ -200,7 +203,7 @@ json StepFrames(TrainerState& state, const json& params, const ClientGone& clien
             throw std::runtime_error{"the step did not present within the timeout; no capture"};
         }
         result["capture"] = end(false);
-        result["capture_present"] = before + 1;
+        result["capture_present"] = before + 2;
     } else if (!capturing) {
         complete = step(frames);
     }

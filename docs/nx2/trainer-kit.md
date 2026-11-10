@@ -35,11 +35,14 @@ presents}`. It is present-granular: the pause lands a present or two late (`adva
 `requested`), and the GPU drains a frame behind the CPU.
 
 `capture: true` (or the `capture_frame` params, such as `{sampled: true}`) captures the frame of
-the last stepped present. It steps `frames - 1` presents, pauses, waits 100 ms for the GPU to
-finish the frames queued before the pause, requests the capture while the game is paused, then
-steps the last present alone. The capture therefore takes that present's frame, and the reply adds
-`capture` (as `capture_frame` answers) and `capture_present`. If the last step does not present
-within the timeout, the request is withdrawn and the call fails, so no later frame is captured.
+the last stepped present. A capture needs two presents. At the end of a frame,
+`RasterizerVulkan::TickFrame` takes the request and arms the frame dump, which then records the
+NEXT frame and finishes at that frame's end. So the call steps at least two presents. It steps all
+but the last two, pauses, waits 100 ms for the GPU to finish the frames queued before the pause,
+requests the capture while the game is paused, then steps the last two. `{frames: 1, capture:
+true}` therefore advances two presents and captures the frame the game stops on. The reply adds
+`capture` (as `capture_frame` answers) and `capture_present`. If the step does not present within
+the timeout, the request is withdrawn and the call fails, so no later frame is captured.
 
 While the game is paused, `capture_frame` and `screenshot` fail at once ("paused: ... needs a
 present"). Before, they waited 5 s for a present and left their request pending; a pending
@@ -248,8 +251,9 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
    the block: stop and report.
 3. `pause`: the Qt menu shows paused, `status.paused` is true. `resume`: both clear.
 4. `step_frames {frames: 1}` ten times: each `advanced` is 1 to 3, the game is paused after
-   each. Then `step_frames {frames: 1, capture: true}` five times: each answers at once with a
-   `capture` whose files exist, and the game is paused after each. A plain `capture_frame` or
+   each. Then `step_frames {frames: 1, capture: true}` five times: each advances 2 presents,
+   answers with a `capture` whose files exist, and its frame is the one the game is paused on (the
+   next `screenshot` after a resume is not needed: compare with the window). A plain `capture_frame` or
    `screenshot` while paused fails at once with "paused: ... needs a present".
 5. `time_control {mode: "scale", value: 0.5}`: Link walks at half speed. `value: 2`: double.
    `off`: normal.

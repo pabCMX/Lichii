@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <atomic>
+#include <optional>
+#include <mutex>
+#include <condition_variable>
 #include <string>
 #include <thread>
 #include <vector>
@@ -17,6 +20,7 @@
 #include "core/debugger/nx2_trainer_tools.h"
 #include "core/file_sys/oot_time_control.h"
 #include "tests/core/system_test_context.h"
+#include "video_core/renderer_vulkan/vk_frame_dump.h"
 
 namespace {
 
@@ -140,23 +144,69 @@ TEST_CASE("pause, resume and step_frames drive the frontend's run control", "[nx
     }
 }
 
-TEST_CASE("step_frames with capture requests it paused and steps the last present alone",
+TEST_CASE("step_frames with capture records the last stepped present, as the frame dump schedules it",
           "[nx2_trainer]") {
+    // The GPU side as RasterizerVulkan::TickFrame runs it at each frame end: a pending request
+    // arms the real FrameDumpSchedule, whose Tick then starts recording the NEXT frame and
+    // finishes at that frame's end.
+    std::mutex mutex;
+    std::condition_variable changed;
+    Vulkan::FrameDumpSchedule schedule;
+    bool pending = false;
+    std::optional<u64> recording, captured;
+    std::atomic<bool> paused{true}, presenting{true}, stop{};
+    std::thread presenter{[&] {
+        while (!stop) {
+            if (!paused && presenting) {
+                const u64 present = Core::g_nx2_present_count.fetch_add(1) + 1;
+                std::scoped_lock lock{mutex};
+                if (pending && schedule.Arm(false, false, 1)) {
+                    pending = false;
+                }
+                switch (schedule.Tick(0.0)) {
+                case Vulkan::FrameDumpSchedule::Step::Start:
+                    recording = present + 1;
+                    break;
+                case Vulkan::FrameDumpSchedule::Step::Finish:
+                    captured = recording;
+                    changed.notify_all();
+                    break;
+                case Vulkan::FrameDumpSchedule::Step::None:
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(2ms);
+        }
+    }};
+    SCOPE_EXIT {
+        stop = true;
+        presenter.join();
+    };
     ScopedSystemTestContext context;
     Core::System system;
-    FakeFrontend frontend;
     std::vector<std::string> events;
     Handlers handlers;
     Core::Nx2Debug::AddTrainerHandlers(
-        handlers, system,
-        {.powered_on = [] { return true; }, .paused = [&] { return frontend.paused.load(); }},
+        handlers, system, {.powered_on = [] { return true; }, .paused = [&] { return paused.load(); }},
         [] { return false; },
         [&](const json& params) {
-            events.push_back(fmt::format("request paused={} sampled={}", frontend.paused.load(),
+            std::scoped_lock lock{mutex};
+            events.push_back(fmt::format("request paused={} sampled={}", paused.load(),
                                          params.value("sampled", false)));
+            pending = true;
+            captured.reset();
             return [&](bool cancel) -> json {
-                events.push_back(cancel ? "cancel" : fmt::format("wait paused={}", frontend.paused.load()));
-                return {{"directory", "capture-1"}};
+                std::unique_lock lock{mutex};
+                if (cancel) {
+                    pending = false;
+                    events.push_back("cancel");
+                    return {};
+                }
+                if (!changed.wait_for(lock, 2s, [&] { return captured.has_value(); })) {
+                    throw std::runtime_error{"capture timed out"};
+                }
+                events.push_back("wait");
+                return {{"recorded_present", *captured}};
             };
         });
     const auto call = [&](const json& params) {
@@ -167,27 +217,27 @@ TEST_CASE("step_frames with capture requests it paused and steps the last presen
         Core::Nx2Debug::SetRunControl({});
         Core::g_nx2_present_count = old_count;
     };
-    Core::Nx2Debug::SetRunControl([&](bool run) { frontend.paused = !run; });
+    Core::Nx2Debug::SetRunControl([&](bool run) { paused = !run; });
 
-    const json one = call({{"frames", 1}, {"capture", true}});
-    REQUIRE(events == std::vector<std::string>{"request paused=true sampled=false", "wait paused=true"});
-    REQUIRE(one["capture"]["directory"] == "capture-1");
-    REQUIRE(one["complete"] == true);
-    REQUIRE(frontend.paused);
-
-    events.clear();
-    const u64 before = Core::g_nx2_present_count.load();
-    const json three = call({{"frames", 3}, {"capture", {{"sampled", true}}}});
-    REQUIRE(events == std::vector<std::string>{"request paused=true sampled=true", "wait paused=true"});
-    REQUIRE(three["capture_present"].get<u64>() >= before + 3);  // the last of the 3 presents
-    REQUIRE(three["advanced"].get<u64>() >= 3);
+    for (const u64 frames : {1, 2, 5}) {
+        events.clear();
+        const u64 before = Core::g_nx2_present_count.load();
+        const json result = call({{"frames", frames}, {"capture", {{"sampled", true}}}});
+        REQUIRE(events == std::vector<std::string>{"request paused=true sampled=true", "wait"});
+        REQUIRE(result["complete"] == true);
+        REQUIRE(paused);
+        // The capture is of the last stepped present: at least 2, one arms the frame dump.
+        REQUIRE(result["capture"]["recorded_present"] == result["capture_present"]);
+        REQUIRE(result["capture_present"].get<u64>() == before + (std::max<u64>)(frames, 2));
+        REQUIRE(result["advanced"].get<u64>() >= (std::max<u64>)(frames, 2));
+    }
 
     // A step that presents nothing withdraws the request: no capture of a later frame.
     events.clear();
-    frontend.presenting = false;
+    presenting = false;
     REQUIRE_THROWS_WITH(call({{"frames", 1}, {"capture", true}, {"timeout_s", 1}}), ContainsSubstring("no capture"));
     REQUIRE(events == std::vector<std::string>{"request paused=true sampled=false", "cancel"});
-    REQUIRE(frontend.paused);
+    REQUIRE(paused);
 }
 
 TEST_CASE("time_control checks its mode and value and needs the patch", "[nx2_trainer]") {
