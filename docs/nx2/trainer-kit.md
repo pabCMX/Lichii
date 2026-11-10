@@ -1,8 +1,8 @@
 # Trainer kit: time control and live switches
 
 The trainer kit adds debug-server methods that a practice panel (like a speedrun trainer) needs:
-pause and step the game, slow it down (to 1/100, nearly frozen), and flip diagnostic switches while it
-runs. It is on `explore/trainer-kit` (a Base plus these commits). It joins the harness kit only
+pause and step the game, slow it down (to half speed) or speed it up, and flip diagnostic switches
+while it runs. It is on `explore/trainer-kit` (a Base plus these commits). It joins the harness kit only
 after a test-PC A/B of the Base against Base + kit shows no speed change.
 
 The kit sits on the `input_record` work (explore/h48-present-record); debug-mcp.md describes
@@ -59,10 +59,11 @@ paused frame.
 | mode | value | step the game gets each frame |
 |---|---|---|
 | `off` | none | its own (or the FPS add-on's) |
-| `scale` | 0.01 to 4 | its own step times `value` |
-| `fixed` | 0.01 to 6 | `value / 60` s of game time, whatever the frame time |
+| `scale` | 0.5 to 4 | its own step times `value` |
+| `fixed` | 0.5 to 6 | `value / 60` s of game time, whatever the frame time |
 
-Without `mode` it only reports. It returns `{address, mode, value?, previous}`, and `trace`
+Without `mode` it only reports. It returns `{address, mode, value?, previous}`, `ramp` when a
+change went up in stages (below), and `trace`
 while a step trace runs or was asked for (see "Step trace").
 
 Units. The game's step is not a plain time. It is in ticks of `s1` Hz, where `s1` is 30 or 60 and
@@ -76,13 +77,35 @@ The first live test (2026-11-10, v1.0.0a-20261109-11) found the first version of
 it gave every caller the same N, ignoring `s1`. With `s1` = 60, fixed 0.5 was half speed; with
 `s1` = 30, 0.5 was the normal step. Systems timed on different bases then ran at different
 relative speeds: presents fell to 14 per second, then the log showed unmapped reads. `scale`
-worked down to 0.01.
+held down to 0.01 while it was set; leaving it is another matter (below).
 
-No true freeze. A step of 0 hangs the game: with `fixed 0` no frame was presented, and `off` did
-not bring presents back. Both modes therefore refuse values below 0.01 (the smallest live-tested
-scale). The panel's "Freeze" preset is `scale 0.01`, 100 times slower: the world nearly stands
-still and the game still renders. `off` always returns to the game's own step. A game that already
-hung cannot be recovered by any mode.
+No freeze by time control: use `pause` and `step_frames`. A step of 0 hangs the game: with `fixed
+0` no frame was presented, and `off` did not bring presents back. Small steps break it when they
+end. On the HTPC (2026-11-10, 20261110-2) `scale 0.1` held 30 s clean (47.4 presents/s, no
+unmapped lines), and then at `off` the guest jumped to address 0 ("Unmapped Read16 @ 0x0",
+"Cannot execute instruction at unmapped address 0x0", 840 lines, the picture frozen for good).
+`scale 0.01` failed the same way at `off` from a fresh boot. `scale 0.5` and back was clean, as
+were `fixed 1`, `2`, `3` and `6` and back. The cause in the game is not known; a step that grows
+10 or 100 times from one frame to the next is the common part. So:
+
+- Both modes refuse values below 0.5, the smallest value tested both ways. The panel has no
+  "Nearly frozen" or quarter-speed preset any more.
+- A change that makes the game more than 2 times faster goes up in doublings, one per present
+  (`TimeRamp`): `off` to `fixed 6` writes `fixed 2` and `fixed 4` first, each for at least one
+  present. The reply lists the stages in `ramp`. While the game is paused such a change is
+  refused ("resume first"), because the stages need running frames. Slowing down is never
+  ramped. With the 0.5 floor, `off` never needs a ramp: it is at most 2 times faster.
+- The writes of a change never show the game a mixed state worse than the old mode at the new
+  value. Before, `off` wrote its value (0) first and the mode after it, so a call between the
+  two got `scale 0` or `fixed 0`, a step of 0. Now `off` writes only the mode word, and another
+  mode writes the value, then the mode, then the magic.
+
+A game that already hung cannot be recovered by any mode.
+
+The unmapped lines seen after the panel's capture and resume came after `scale 0.01`, `fixed 2`,
+`off` in the same boot. The pause and capture are not the cause: with time control off, pauses of
+20 s and 60 s, 5 steps without capture and 5 with capture (also at `fixed 2`) gave 0 unmapped
+lines before, during and after.
 
 **Benchmark mode: `fixed 2`.** Every frame advances the game by 1/30 s, as in real play at 30
 FPS, whatever the host's speed: a slow host renders the same game frames, only slower. With both
@@ -345,10 +368,12 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
 
    Record the counts per hold and action next to the baseline. A failed hold ends the ladder;
    that boot proves nothing more.
-7. Then fractional steps, each from a fresh boot after a clean whole-step ladder: `fixed 0.5`,
-   `0.1`, `0.01`, then `scale` 0.25, 0.1, 0.01, each 30 s with walking and camera, then `off`, with
-   the same `Unmapped` counts against the OFF baseline of that boot. `fixed 0` and anything below
-   0.01 must be refused by the server.
+7. Then the half steps, each from a fresh boot after a clean whole-step ladder: `fixed 0.5` and
+   `scale 0.5`, each 30 s with walking and camera, then `off`, with the same `Unmapped` counts
+   against the OFF baseline of that boot. `scale 0.25`, `0.1`, `0.01`, `fixed 0` and `fixed 0.1`
+   must be refused by the server with "must be 0.5 to". Then the ramp: from `scale 0.5`, set
+   `fixed 6`; the reply's `ramp` is `[1, 2, 4]`, and 30 s of play after it and after `off` give no
+   lines above the baseline. While paused, the same change is refused with "resume first".
 8. With FPS Unlock on, `fixed 2`: game speed follows the frame rate (game time 1/30 s per frame),
    as with both add-ons off.
 9. Benchmark mode: record a clip with `fixed 2` set before the save load, replay it 3 times with

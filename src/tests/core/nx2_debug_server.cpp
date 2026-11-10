@@ -513,6 +513,11 @@ TEST_CASE("Debug input steps can follow host time instead of presents", "[core][
         CAPTURE(bad.dump());
         REQUIRE_THROWS_AS(Core::Nx2Debug::ParseInputStep(bad), std::exception);
     }
+    // A decimal is not a range error: the message says what is wrong.
+    REQUIRE_THROWS_WITH(Core::Nx2Debug::ParseInputStep(json{{"ms", 16.5}}),
+                        Catch::Matchers::ContainsSubstring("ms must be a whole number, 1 to 600000 (got 16.5)"));
+    REQUIRE_THROWS_WITH(Core::Nx2Debug::ParseInputStep(json{{"frames", 2.5}}),
+                        Catch::Matchers::ContainsSubstring("frames must be a whole number"));
     std::vector<Core::Nx2Debug::InputStep> steps(2);
     steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}}, .frames = 0,
                 .ms = 2};

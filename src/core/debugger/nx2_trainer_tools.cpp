@@ -34,9 +34,11 @@ namespace {
 
 /// Presents one step_frames call runs at most (10 s at 60 fps).
 constexpr u64 MAX_STEP_FRAMES = 600;
-/// time_control limits. 6.0 is FPS Unlock's largest step (a 100 ms frame). The game hangs on a
-/// step of 0 (live, 2026-11-10): no value below MIN_STEP, the smallest one tested live (scale).
-constexpr float MIN_STEP = 0.01f;
+/// time_control limits. 6.0 is FPS Unlock's largest step (a 100 ms frame). MIN_STEP is the
+/// smallest value tested both ways: scale 0.5 and back to off ran clean, while scale 0.1 and 0.01
+/// ran clean but broke the game when left (HTPC, 2026-11-10: a jump to address 0 at "off"). A
+/// step of 0 hangs the game.
+constexpr float MIN_STEP = 0.5f;
 constexpr float MAX_SCALE = 4.0f;
 constexpr float MAX_FIXED_STEP = 6.0f;
 /// time_control {trace: N}: at most 10 minutes at 60 presents a second.
@@ -210,8 +212,11 @@ json Resume(TrainerState& state, const json& params, const ClientGone& client_go
 json StepFrames(TrainerState& state, const json& params, const ClientGone& client_gone) {
     RequireGame(state);
     const json& value = params.at("frames");
-    if (!value.is_number_integer() || value.get<s64>() < 1 ||
-        value.get<u64>() > MAX_STEP_FRAMES) {
+    if (!value.is_number_integer()) {
+        throw std::runtime_error{
+            fmt::format("frames must be a whole number, 1 to {} (got {})", MAX_STEP_FRAMES, value.dump())};
+    }
+    if (value.get<s64>() < 1 || value.get<u64>() > MAX_STEP_FRAMES) {
         throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_STEP_FRAMES)};
     }
     const u64 frames = value.get<u64>();
@@ -299,6 +304,25 @@ Block ReadBlock(Memory::Memory& memory, u64 address) {
     return std::bit_cast<Block>(bytes);
 }
 
+/// How fast a block runs the game against its own step at 60 FPS: off 1, scale and fixed their
+/// value (fixed v is v / 60 s a frame; with s0 at 60 the game's own step is 1 / 60 s).
+float Speed(const Block& block) {
+    const u32 mode = block.magic == FileSys::OotTimeControl::Magic ? block.mode : 0;
+    return mode == 1 || mode == 2 ? block.value : 1.0f;
+}
+
+/// Writes a mode so that every state a game call can see in between is the old setting, the
+/// new one, or the old mode at the new value (scale v and fixed v run about as fast). "off" only
+/// clears the mode word: writing its value first left one call at scale 0 or fixed 0, a step of
+/// 0 that hangs the game.
+void WriteBlock(Memory::Memory& memory, u64 address, FileSys::OotTimeControl::Mode mode, float value) {
+    if (mode != FileSys::OotTimeControl::Mode::Off) {
+        memory.Write32(address + offsetof(Block, value), std::bit_cast<u32>(value));
+    }
+    memory.Write32(address + offsetof(Block, mode), static_cast<u32>(mode));
+    memory.Write32(address + offsetof(Block, magic), FileSys::OotTimeControl::Magic);
+}
+
 json Describe(const Block& block) {
     const u32 mode = block.magic == FileSys::OotTimeControl::Magic ? block.mode : 0;
     json result = {{"mode", ModeName(mode)}};
@@ -346,7 +370,7 @@ void StepTraceControl(Memory::Memory& memory, u64 area_address, u64 presents) {
 // Sets how the game's step is changed each frame (OotTimeControl): "off", "scale" (step * value)
 // or "fixed" (value). Without mode it only reports. trace: N traces the routine's calls for N
 // presents (0 stops), trace_read returns the trace with its first records.
-json TimeControl(TrainerState& state, const json& params, const ClientGone&) {
+json TimeControl(TrainerState& state, const json& params, const ClientGone& client_gone) {
     namespace TC = FileSys::OotTimeControl;
     std::optional<TC::Mode> mode;
     float value = 0.0f;
@@ -355,8 +379,9 @@ json TimeControl(TrainerState& state, const json& params, const ClientGone&) {
         const json& given = params.at("trace");
         if (!given.is_number_integer() || given.get<s64>() < 0 ||
             given.get<u64>() > MAX_TRACE_PRESENTS) {
-            throw std::runtime_error{
-                fmt::format("trace is the presents to trace, 1 to {}, or 0 to stop", MAX_TRACE_PRESENTS)};
+            throw std::runtime_error{fmt::format(
+                "trace is the presents to trace, a whole number, 1 to {}, or 0 to stop (got {})",
+                MAX_TRACE_PRESENTS, given.dump())};
         }
         trace = given.get<u64>();
     }
@@ -372,7 +397,9 @@ json TimeControl(TrainerState& state, const json& params, const ClientGone&) {
             value = given.is_number() ? given.get<float>() : -1.0f;
             if (!std::isfinite(value) || value < MIN_STEP || value > high) {
                 throw std::runtime_error{fmt::format(
-                    "{} value must be {} to {} (a step of 0 hangs the game)", name, MIN_STEP, high)};
+                    "{} value must be {} to {} (the game broke when it left scale 0.1 or 0.01, and a "
+                    "step of 0 hangs it; use pause and step_frames to stop time)",
+                    name, MIN_STEP, high)};
             }
         } else {
             throw std::runtime_error{
@@ -404,11 +431,30 @@ json TimeControl(TrainerState& state, const json& params, const ClientGone&) {
     if (!mode) {
         result.update(Describe(previous));
     } else {
-        // The value first: the routine reads the mode, then the value, at its next call.
-        memory.Write32(address + offsetof(Block, value), std::bit_cast<u32>(value));
-        memory.Write32(address + offsetof(Block, mode), static_cast<u32>(*mode));
-        memory.Write32(address + offsetof(Block, magic), TC::Magic);
+        const auto stages = TimeRamp(Speed(previous), *mode == TC::Mode::Off ? 1.0f : value);
+        if (!stages.empty() && state.run.paused()) {
+            throw std::runtime_error{"resume first: a step more than 2x faster goes up in steps over "
+                                     "running frames"};
+        }
+        // Each stage for at least one present, so the game's step never grows more than 2x
+        // from one frame to the next. Leaving off for scale or fixed, the stages are scale.
+        const TC::Mode stage_mode = *mode == TC::Mode::Off ? TC::Mode::Scale : *mode;
+        json ramp = json::array();
+        for (const float stage : stages) {
+            WriteBlock(memory, address, stage_mode, stage);
+            ramp.push_back(stage);
+            const u64 at = Presents();
+            if (!WaitFor(state, client_gone, 2s, [&] { return Presents() > at; })) {
+                throw std::runtime_error{fmt::format(
+                    "the ramp stopped at {} {}: no present within 2 s; call again to go on",
+                    ModeName(static_cast<u32>(stage_mode)), stage)};
+            }
+        }
+        WriteBlock(memory, address, *mode, value);
         result.update(Describe(ReadBlock(memory, address)));
+        if (!ramp.empty()) {
+            result["ramp"] = std::move(ramp);
+        }
     }
     if (trace) {
         StepTraceControl(memory, address + (TC::TraceOffset - TC::BlockOffset), *trace);
@@ -457,6 +503,20 @@ json Switches(TrainerState&, const json& params, const ClientGone&) {
 }
 
 } // Anonymous namespace
+
+std::vector<float> TimeRamp(float from, float to) {
+    std::vector<float> stages;
+    if (!(from > 0.0f) || !std::isfinite(from) || !std::isfinite(to)) {
+        return stages;
+    }
+    // Doubling from `from` while the target is more than a doubling away; the last write, to
+    // `to`, is then at most TIME_RAMP_FACTOR faster. At most 32 stages (a factor of 4e9).
+    for (float current = from; to > current * TIME_RAMP_FACTOR && stages.size() < 32;) {
+        current *= TIME_RAMP_FACTOR;
+        stages.push_back(current);
+    }
+    return stages;
+}
 
 void StepTrace::Field::Add(float value) {
     if (std::isnan(value)) {
