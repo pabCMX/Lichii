@@ -379,6 +379,9 @@ Png CaptureScreenshot(System& system, u32 height, std::chrono::seconds timeout,
             "no frame was presented within {} s (paused or loading?)", timeout.count())};
     }
     const bool invert_y = future.get();
+    // Stored on the GPU thread before the callback was started. The debug server is serial, and
+    // a bug bundle's screenshot is refused while this one is pending, so read it now.
+    const u64 present = renderer.ScreenshotPresent();
     std::vector<u8> rgb(size_t{layout.width} * layout.height * 3);
     for (u32 y = 0; y < layout.height; ++y) {
         const u8* source = pixels->data() + size_t{invert_y ? layout.height - 1 - y : y} * layout.width * 4;
@@ -395,6 +398,7 @@ Png CaptureScreenshot(System& system, u32 height, std::chrono::seconds timeout,
                                 static_cast<int>(layout.width * 3))) {
         throw std::runtime_error{"PNG encoding failed"};
     }
+    png.present = present;
     return png;
 }
 
@@ -405,7 +409,7 @@ json Screenshot(ToolState& state, const json& params) {
         state.system, Param<u32>(params, "height", 720, 144, 2160),
         std::chrono::seconds{Param<int>(params, "timeout_s", 5, 1, 30)}, state.stopping);
     const std::vector<u8>& png = shot.bytes;
-    json result = {{"width", shot.width}, {"height", shot.height}};
+    json result = {{"width", shot.width}, {"height", shot.height}, {"present", shot.present}};
     if (params.value("save", false)) {
         std::filesystem::create_directories(state.dump_directory);
         const auto path =

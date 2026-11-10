@@ -32,6 +32,7 @@ Both are described in [debug-mcp.md](debug-mcp.md) under "Input". Without `ms`, 
 `start_present`, nothing changes: the input injector (`EmulatedController::SetInputInjector`) is
 the origin code, and the response has the origin keys. The test "Debug input answers as before
 unless the client asks for ms or measure" in `src/tests/core/nx2_debug_server.cpp` checks this.
+`screenshot` adds `present`, the guest present of the captured frame.
 
 ## What the harness uses
 

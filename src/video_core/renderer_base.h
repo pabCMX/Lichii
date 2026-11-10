@@ -71,6 +71,8 @@ struct RendererSettings {
     std::function<void(bool)> screenshot_complete_callback;
     Layout::FramebufferLayout screenshot_framebuffer_layout;
     Service::Nvnflinger::LayerStackId screenshot_layer_stack{Service::Nvnflinger::LayerStackId::Default};
+    /// The guest present of the last captured screenshot (g_nx2_composite_present).
+    std::atomic<u64> screenshot_present{};
 };
 
 class RendererBase {
@@ -154,6 +156,12 @@ public:
 
     /// Returns true if a screenshot is being processed
     bool IsScreenshotPending() const;
+
+    /// The guest present count of the frame the last screenshot captured. Set before its callback
+    /// runs, so the callback and whoever it wakes can read it.
+    [[nodiscard]] u64 ScreenshotPresent() const {
+        return renderer_settings.screenshot_present.load(std::memory_order_acquire);
+    }
 
     /// Request a screenshot of the next frame.
     void RequestScreenshot(void* data, std::function<void(bool)> callback,
