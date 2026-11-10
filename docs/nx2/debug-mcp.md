@@ -458,7 +458,7 @@ per game present, so its clips drift when replayed with `input_sequence` (H48).
 | --- | --- |
 | `start` | `{recording: true, start_present, controller, mode}`. `mode` is `"any"` (default) or `"sample"`, see below. Fails while a recording runs. |
 | `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, mode, truncated, controllers}`, where `steps` is a count. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
-| `stop` | `{steps: [...], presents, start_present, end_present, controller, mode, truncated}`. Fails when nothing records. The count still running is closed with what it had so far. |
+| `stop` | `{steps: [...], presents, start_present, end_present, controller, mode, truncated}`, and in mode `"any"` also `steps_at_count` and `blocked_us: {presents, mean, max}`. Fails when nothing records. The count still running is closed with what it had so far. |
 
 - `controller` is the controller a replay goes to: `player1`, or `handheld` when player 1 is
   not connected, the same choice `input` makes, made once at `start`. The recording itself reads
@@ -498,9 +498,23 @@ swung at least 6 times. While mode `"any"` records, `RequestPadStateUpdate` (`np
 getters and ORs the buttons into count c, but only when the present count is c before and after
 its read: a read that may belong to count c + 1 is left out, so scripted input of the next count
 never leaks into this one. Count c is closed into the recording at present c + 1, or at `stop`.
-Sticks are the value at the start of the count in both modes: the replay holds one stick value
-per count, and a stick moves continuously, so the start value lags by one present at most. The
-largest deflection would turn a short flick into a whole present at full tilt.
+Sticks in mode `"any"` are the value at the REPLY of present c. The game is blocked inside
+nx2:vi2 229 from the count until the reply (the previous frame's fence, the composite, vblank
+pacing; `PresentClientBuffer` in `nx2_gsv.h`), and it reads its next input only after the reply.
+A sample when the count goes up is therefore early by that whole time, and a moving stick then
+replays older than what the game read: long clips ended a stable 4 to 10 px off the owner's end
+point. `g_nx2_present_reply_hook` runs just before the reply; a count whose reply did not come
+(the last one at `stop`) keeps its start value. The replay holds one stick value per count, so
+the reply value is what a game that reads input at the start of its frame gets. The largest
+deflection would turn a short flick into a whole present at full tilt, and the last read of the
+count is late by almost a whole frame of game logic.
+
+A harness replays `steps`. `steps_at_count` is TEMPORARY: the same presents and buttons with the
+stick at the count (the phase before 2026-11-10), for one A/B replay against `steps`. It is
+dropped after that A/B. Both lists keep the step limit; `truncated` is true when either reached
+it, and only then can their frame sums differ. `blocked_us` is the time from count to reply over
+the presents that had a reply, in microseconds: the stick phase error of a recording made before
+this change. Mode `"sample"` has neither: it takes the stick at the count, as before.
 
 Trade-off: if the game reads only the latest entry once per frame, mode `"any"` can add a press
 the game never saw (a press that began and ended between two of its reads). Which entries a game

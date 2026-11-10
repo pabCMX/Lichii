@@ -934,12 +934,23 @@ struct Recorder {
     /// Mode "any" (default): a count's step holds every button the npad updater gave the game at
     /// any time during that count. Mode "sample": the input at the start of the count only.
     bool any{true};
-    /// Mode "any": the count still running, closed into the recording at the next present.
+    /// Mode "any": the count still running, closed into the recordings at the next present.
+    /// input has the sticks of the count's start; reply_input those of the present's reply.
     struct OpenCount {
         u64 present;
         HID::InjectedInput input;
+        std::optional<HID::InjectedInput> reply_input;
+        std::chrono::steady_clock::time_point counted;
     };
     std::optional<OpenCount> open;
+    /// Mode "any": the same presents with the sticks of the count's start, the phase before
+    /// 2026-11-10, for one A/B (temporary).
+    std::optional<InputRecording> at_count;
+    /// Mode "any": the time from each present's count to its reply, which the game spends blocked
+    /// in the present call.
+    u64 blocked_sum_us{};
+    u64 blocked_max_us{};
+    u64 blocked_presents{};
 };
 
 Recorder& GetRecorder() {
@@ -1007,23 +1018,30 @@ json ControllerStates(std::span<HID::EmulatedController* const> controllers) {
 
 void ClearRecordHooks() {
     g_nx2_present_hook.store(nullptr, std::memory_order_release);
+    g_nx2_present_reply_hook.store(nullptr, std::memory_order_release);
     HID::g_npad_read_hook.store(nullptr, std::memory_order_release);
 }
 
-/// Mode "any": moves the open count into the recording. False once the recording is truncated.
+/// Mode "any": moves the open count into the recordings: its buttons with the sticks of the
+/// present's reply (or of its start, without a reply), and with the sticks of its start. False
+/// once a recording is truncated.
 bool CloseCount(Recorder& recorder) {
     if (!recorder.open) {
         return true;
     }
     const Recorder::OpenCount open = *recorder.open;
     recorder.open.reset();
-    return recorder.recording->Add(open.present, open.input);
+    HID::InjectedInput at_reply = open.reply_input.value_or(open.input);
+    at_reply.buttons = open.input.buttons;
+    const bool kept = recorder.recording->Add(open.present, at_reply);
+    return recorder.at_count->Add(open.present, open.input) && kept;
 }
 
 /// g_nx2_present_hook while input_record records. Runs right after the present count becomes
 /// present, so it reads the input the injector and the owner's pad give at the start of that
 /// count. Mode "any" then keeps the count open for the npad reads during it.
 void RecordPresent(u64 present) {
+    const auto counted = std::chrono::steady_clock::now();
     Recorder& recorder = GetRecorder();
     std::scoped_lock lock{recorder.mutex};
     if (!recorder.recording || recorder.recording->Truncated() ||
@@ -1039,8 +1057,31 @@ void RecordPresent(u64 present) {
         return;
     }
     if (recorder.any) {
-        recorder.open = Recorder::OpenCount{.present = present, .input = input};
+        recorder.open = Recorder::OpenCount{.present = present,
+                                            .input = input,
+                                            .reply_input = std::nullopt,
+                                            .counted = counted};
     }
+}
+
+/// g_nx2_present_reply_hook in mode "any": takes the open count's sticks at the present's reply,
+/// after which the game reads its next input, and the time it was blocked.
+void RecordPresentReply(u64 present) {
+    Recorder& recorder = GetRecorder();
+    std::scoped_lock lock{recorder.mutex};
+    if (!recorder.open || recorder.open->present != present) {
+        return;
+    }
+    const u64 blocked_us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() -
+                                                recorder.open->counted)
+                                                .count());
+    recorder.blocked_sum_us += blocked_us;
+    recorder.blocked_max_us = (std::max)(recorder.blocked_max_us, blocked_us);
+    ++recorder.blocked_presents;
+    HID::InjectedInput input = GameInput(recorder.sources);
+    recorder.open->input.buttons |= input.buttons;
+    recorder.open->reply_input = input;
 }
 
 /// HID::g_npad_read_hook in mode "any": ORs the buttons the npad updater reads for the game into
@@ -1070,6 +1111,7 @@ void StopRecording() {
     std::scoped_lock lock{recorder.mutex};
     ClearRecordHooks();
     recorder.recording.reset();
+    recorder.at_count.reset();
     recorder.open.reset();
     recorder.sources = {};
 }
@@ -1101,14 +1143,22 @@ json InputRecord(ToolState& state, const json& params) {
         recorder.controller_name = picked.second;
         recorder.any = mode == "any";
         recorder.open.reset();
+        recorder.blocked_sum_us = recorder.blocked_max_us = recorder.blocked_presents = 0;
         // The hooks go in first. A present counted meanwhile waits for the lock, then is
         // recorded or ignored by the start present read below, so none is lost.
         g_nx2_present_hook.store(RecordPresent, std::memory_order_release);
         if (recorder.any) {
             HID::g_npad_read_hook.store(RecordNpadRead, std::memory_order_release);
+            g_nx2_present_reply_hook.store(RecordPresentReply, std::memory_order_release);
         }
         recorder.recording.emplace(g_nx2_present_count.load(std::memory_order_relaxed) + 1,
                                    MAX_INPUT_FRAMES, MAX_INPUT_STEPS);
+        if (recorder.any) {
+            recorder.at_count.emplace(recorder.recording->StartPresent(), MAX_INPUT_FRAMES,
+                                      MAX_INPUT_STEPS);
+        } else {
+            recorder.at_count.reset();
+        }
         return {{"recording", true},
                 {"start_present", recorder.recording->StartPresent()},
                 {"controller", picked.second},
@@ -1126,13 +1176,16 @@ json InputRecord(ToolState& state, const json& params) {
                 {"steps", recorder.recording->Steps().size()},
                 {"controller", recorder.controller_name},
                 {"mode", recorder.any ? "any" : "sample"},
-                {"truncated", recorder.recording->Truncated()},
+                {"truncated", recorder.recording->Truncated() ||
+                                  (recorder.at_count && recorder.at_count->Truncated())},
                 {"controllers", std::move(controllers)}};
     }
     if (action == "stop") {
         std::optional<InputRecording> recording;
+        std::optional<InputRecording> at_count;
         std::string name;
         bool any{};
+        u64 blocked_sum_us{}, blocked_max_us{}, blocked_presents{};
         {
             std::scoped_lock lock{recorder.mutex};
             if (!recorder.recording) {
@@ -1144,20 +1197,36 @@ json InputRecord(ToolState& state, const json& params) {
             any = recorder.any;
             recording = std::move(recorder.recording);
             recorder.recording.reset();
+            at_count = std::move(recorder.at_count);
+            recorder.at_count.reset();
+            blocked_sum_us = recorder.blocked_sum_us;
+            blocked_max_us = recorder.blocked_max_us;
+            blocked_presents = recorder.blocked_presents;
             recorder.sources = {};
             name = std::move(recorder.controller_name);
         }
-        json steps = json::array();
-        for (const InputStep& step : recording->Steps()) {
-            steps.push_back(InputStepJson(step));
+        const auto steps_json = [](const InputRecording& from) {
+            json steps = json::array();
+            for (const InputStep& step : from.Steps()) {
+                steps.push_back(InputStepJson(step));
+            }
+            return steps;
+        };
+        json result = {{"steps", steps_json(*recording)},
+                       {"presents", recording->Presents()},
+                       {"start_present", recording->StartPresent()},
+                       {"end_present", recording->StartPresent() + recording->Presents() - 1},
+                       {"controller", std::move(name)},
+                       {"mode", any ? "any" : "sample"},
+                       {"truncated", recording->Truncated() || (at_count && at_count->Truncated())}};
+        if (at_count) {
+            result["steps_at_count"] = steps_json(*at_count);
+            result["blocked_us"] = {
+                {"presents", blocked_presents},
+                {"mean", blocked_presents ? blocked_sum_us / blocked_presents : 0},
+                {"max", blocked_max_us}};
         }
-        return {{"steps", std::move(steps)},
-                {"presents", recording->Presents()},
-                {"start_present", recording->StartPresent()},
-                {"end_present", recording->StartPresent() + recording->Presents() - 1},
-                {"controller", std::move(name)},
-                {"mode", any ? "any" : "sample"},
-                {"truncated", recording->Truncated()}};
+        return result;
     }
     throw std::runtime_error{"action must be start, status or stop"};
 }

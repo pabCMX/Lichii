@@ -2180,6 +2180,10 @@ private:
                 m_stats = {.last_present = entered};
             }
         }
+        // The game is blocked in this call until the reply; it reads its next input after it.
+        if (const auto hook = Core::g_nx2_present_reply_hook.load(std::memory_order_acquire)) {
+            hook(present);
+        }
         constexpr u64 AvailableSlots = 0x7fff;
         TipcReplyWords(ctx, {static_cast<u32>(AvailableSlots),
                              static_cast<u32>(AvailableSlots >> 32), 0, 0, 0, 0});

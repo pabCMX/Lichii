@@ -92,6 +92,7 @@ std::atomic<u64> g_nx2_present_count{};
 static_assert(std::atomic<u64>::is_always_lock_free);
 std::array<std::atomic<u64>, 4096> g_nx2_present_times_ns{};
 std::atomic<void (*)(u64)> g_nx2_present_hook{};
+std::atomic<void (*)(u64)> g_nx2_present_reply_hook{};
 std::atomic<u64> g_nx2_composite_present{};
 
 u64 RecordGuestPresent() {

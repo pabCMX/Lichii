@@ -128,6 +128,8 @@ u64 RecordGuestPresent();
 /// Called on the present path with each new present count while set; only the debug server's
 /// input_record sets it.
 extern std::atomic<void (*)(u64)> g_nx2_present_hook;
+/// Called on the present path just before the present's reply, while set (input_record).
+extern std::atomic<void (*)(u64)> g_nx2_present_reply_hook;
 /// The present count of the frame the GPU thread composites now (set before each composite).
 extern std::atomic<u64> g_nx2_composite_present;
 
