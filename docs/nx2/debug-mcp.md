@@ -185,8 +185,8 @@ An older exe ignores parameters it does not know (`input_sequence {start_present
 at the next present), so a client reads `features` first. An exe without the method answers
 "unknown method": it is older than the list. The names are `input_ms` (`ms` steps), `measure`,
 `input_record`, `record_mode` (`mode` any or sample), `start_present`, `landed_present`,
-`screenshot_present` and `luma_watch`. `kit` is 1 and rises when the contract of a listed
-feature changes. `status` stays as origin's.
+`screenshot_present`, `luma_watch` and `npad_sync`. `kit` is 2 (since `npad_sync`) and rises
+when the contract of a listed feature changes. `status` stays as origin's.
 
 **`luma_watch`** `{presents?, cancel?, wait_s?}` finds a load's fade-in exactly, after the fact.
 `{presents: N}` (1 to 3600) arms the next N composites: each one renders a 256x144 copy of the
@@ -434,6 +434,16 @@ input for one more frame. With the stamps on (only while a frame-step call or a 
 `g_nx2_present_times_ns`. An update that began just before the count but read after it is
 counted as stale too, so the list is an upper bound.
 
+**`npad_sync`** (default true, any frame-step `input` or `input_sequence`) removes that race:
+at the reply of each covered present, the reply hook runs one npad update itself
+(`HID::UpdateNpadNow`, i.e. `ResourceManager::UpdateNpad`) before the game resumes. It takes the
+npad lock the 1 ms update takes, and each entry gets the next sampling number, so the game sees
+one more normal entry, the newest, with the present's step. The cost is one npad update per
+present (microseconds), only while a call runs. Side effects: the turbo-button phase advances one
+extra step per present. The stale check runs before the update, so `stale_presents` still shows
+where the race would have hit. `"npad_sync": false` turns the update off for an A/B; calls with
+`measure` or `start_present` echo `npad_sync`.
+
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
 (`SCOPE_EXIT`): when the steps are done; on timeout (default `frames / 20 + 10` or
@@ -469,9 +479,9 @@ per game present, so its clips drift when replayed with `input_sequence` (H48).
 
 | Action | Result |
 | --- | --- |
-| `start` | `{recording: true, start_present, controller, mode}`. `mode` is `"any"` (default) or `"sample"`, see below. Fails while a recording runs. |
+| `start` | `{recording: true, start_present, controller, mode, npad_sync}`. `mode` is `"any"` (default) or `"sample"`, see below. `npad_sync` (default true, mode `"any"` only) runs one npad update at each present's reply, as replays do. Fails while a recording runs. |
 | `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, mode, truncated, controllers}`, where `steps` is a count. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
-| `stop` | `{steps: [...], presents, start_present, end_present, controller, mode, truncated}`, and in mode `"any"` also `steps_at_count` and `blocked_us: {presents, mean, max}`. Fails when nothing records. The count still running is closed with what it had so far. |
+| `stop` | `{steps: [...], presents, start_present, end_present, controller, mode, npad_sync, truncated}`, and in mode `"any"` also `steps_at_count` and `blocked_us: {presents, mean, max}`. Fails when nothing records. The count still running is closed with what it had so far. |
 
 - `controller` is the controller a replay goes to: `player1`, or `handheld` when player 1 is
   not connected, the same choice `input` makes, made once at `start`. The recording itself reads
@@ -521,6 +531,12 @@ point. `g_nx2_present_reply_hook` runs just before the reply; a count whose repl
 the reply value is what a game that reads input at the start of its frame gets. The largest
 deflection would turn a short flick into a whole present at full tilt, and the last read of the
 count is late by almost a whole frame of game logic.
+
+With `npad_sync` the recorder's reply sample is taken right after that npad update, so a step
+holds exactly the newest entry the game read next, and a replay with `npad_sync` gives the game
+the same entry: record and replay describe the same thing. A recording with `npad_sync: false`
+(and every recording made before kit 2) can differ from what the game read by up to 1 ms of
+input plus the timer thread's lateness.
 
 A harness replays `steps`. `steps_at_count` is TEMPORARY: the same presents and buttons with the
 stick at the count (the phase before 2026-11-10), for one A/B replay against `steps`. It is

@@ -31,7 +31,10 @@ Debug-server parameters and methods, in `src/core/debugger/nx2_debug_tools.cpp`:
   Ctrl+F8, starts and stops it and saves the steps to `<user dir>/tas/present-record-<n>.json`.
 - `start_present` on `input` and `input_sequence` puts step 0 at that present; `screenshot`
   answers the present it captured.
-- `features` lists what the build supports (`kit` 1), so a client can tell an older exe apart.
+- `features` lists what the build supports (`kit` 2), so a client can tell an older exe apart.
+- `npad_sync` (default on): one npad update at each present's reply while a frame-step call or a
+  recording in mode `any` runs (`HID::UpdateNpadNow`), so the game reads the present's step;
+  `stale_presents` names where the race would have hit.
 - `luma_watch` keeps `[present, mean luma]` for the next N composites, to find a fade-in
   exactly. It stalls the GPU thread per present while armed (`RenderLumaSample` in both
   renderers, state in `video_core/nx2_debug_control`).

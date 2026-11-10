@@ -84,7 +84,25 @@ ResourceManager::ResourceManager(Core::System& system_,
         });
 }
 
+namespace {
+/// The initialized resource manager, for UpdateNpadNow.
+std::atomic<ResourceManager*> g_resource_manager{};
+} // Anonymous namespace
+
+bool UpdateNpadNow() {
+    ResourceManager* const manager = g_resource_manager.load(std::memory_order_acquire);
+    if (manager == nullptr) {
+        return false;
+    }
+    // NPad::OnUpdate takes the npad lock the 1 ms update takes; each entry gets the next
+    // sampling number, so the game sees one more normal entry.
+    manager->UpdateNpad({});
+    return true;
+}
+
 ResourceManager::~ResourceManager() {
+    ResourceManager* self = this;
+    g_resource_manager.compare_exchange_strong(self, nullptr, std::memory_order_acq_rel);
     system.CoreTiming().UnscheduleEvent(npad_update_event);
     system.CoreTiming().UnscheduleEvent(default_update_event);
     system.CoreTiming().UnscheduleEvent(mouse_keyboard_update_event);
@@ -109,6 +127,7 @@ void ResourceManager::Initialize() {
     InitializeAHidSampler();
 
     is_initialized = true;
+    g_resource_manager.store(this, std::memory_order_release);
 }
 
 std::shared_ptr<AppletResource> ResourceManager::GetAppletResource() const {

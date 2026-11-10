@@ -60,6 +60,10 @@ struct HandheldConfig;
 extern std::atomic<bool> g_npad_update_stamps;
 extern std::atomic<u64> g_npad_update_ns;
 
+/// The debug server's npad sync: one npad update now, from the present path, so the newest npad
+/// entry carries the input of the present just counted. False when no resource manager runs.
+bool UpdateNpadNow();
+
 class ResourceManager {
 
 public:
