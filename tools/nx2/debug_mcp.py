@@ -287,6 +287,20 @@ TOOLS = [
         },
     },
     {
+        "name": "luma_watch",
+        "description": "Finds a load's fade-in exactly: {presents: N} arms the next N composites "
+                       "(1-3600) for a [present, mean luma 0-255] sample each; {} reads them, "
+                       "waiting up to wait_s for done; {cancel: true} disarms. STALLS the GPU "
+                       "thread per present while armed: only around a load, never during "
+                       "measured input.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"presents": {"type": "integer", "minimum": 1, "maximum": 3600},
+                           "cancel": {"type": "boolean"},
+                           "wait_s": {"type": "integer", "minimum": 0, "maximum": 120}},
+        },
+    },
+    {
         "name": "host_timing",
         "description": "Turns the per-second 'HostTiming wait' log line (EDEN_NX2_HOSTTIMING_STATS) "
                        "on or off; read it with log_tail. Returns the previous and current state.",
@@ -389,6 +403,8 @@ def default_timeout(name, params):
         return math.ceil(params.get("seconds", 5)) + 1
     if name == "sample":
         return int(params.get("seconds", 10)) + 90
+    if name == "luma_watch":
+        return int(params.get("wait_s", 0)) + 5
     if name in ("input", "input_sequence") and "start_present" in params:
         # The lead before start_present is not known here: wait as long as the server may.
         return 900

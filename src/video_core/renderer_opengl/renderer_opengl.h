@@ -59,10 +59,13 @@ private:
     void RenderToBuffer(std::span<const Tegra::FramebufferConfig> framebuffers,
                         const Layout::FramebufferLayout& layout, void* dst);
     void RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers);
+    /// The debug server's luma_watch: a small copy of the frame while armed (waits for the GPU).
+    void RenderLumaSample(std::span<const Tegra::FramebufferConfig> framebuffers);
     void RenderAppletCaptureLayer(std::span<const Tegra::FramebufferConfig> framebuffers);
 
     std::vector<Tegra::FramebufferConfig> applet_capture_layers;
     std::vector<Tegra::FramebufferConfig> screenshot_layer_scratch;
+    std::vector<Tegra::FramebufferConfig> luma_layer_scratch;
 
     Core::Frontend::EmuWindow& emu_window;
     Tegra::MaxwellDeviceMemoryManager& device_memory;

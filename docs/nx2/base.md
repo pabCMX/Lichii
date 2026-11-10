@@ -18,7 +18,7 @@ Branch `base/Base-0ab7736df9-20261109-0905`, cut 2026-11-09 09:05 US Eastern.
 
 ## What the kit adds
 
-Two debug-server parameters and one method, all in `src/core/debugger/nx2_debug_tools.cpp`:
+Debug-server parameters and methods, in `src/core/debugger/nx2_debug_tools.cpp`:
 
 - `input` and `input_sequence` steps can give `ms` instead of `frames`. Timed steps follow host
   time. The response then has `clock: "host_time"` and `ms`.
@@ -28,6 +28,11 @@ Two debug-server parameters and one method, all in `src/core/debugger/nx2_debug_
   npad updater (mode `any`: every button given during a present), and raises the limits to 6000 steps
   per call and 3840 measured presents. The Qt hotkey Record Input (Per Present), default
   Ctrl+F8, starts and stops it and saves the steps to `<user dir>/tas/present-record-<n>.json`.
+- `start_present` on `input` and `input_sequence` puts step 0 at that present; `screenshot`
+  answers the present it captured.
+- `luma_watch` keeps `[present, mean luma]` for the next N composites, to find a fade-in
+  exactly. It stalls the GPU thread per present while armed (`RenderLumaSample` in both
+  renderers, state in `video_core/nx2_debug_control`).
 
 Both are described in [debug-mcp.md](debug-mcp.md) under "Input". Without `ms`, `measure` or
 `start_present`, nothing changes: the input injector (`EmulatedController::SetInputInjector`) is

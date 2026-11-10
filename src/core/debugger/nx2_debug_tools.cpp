@@ -45,6 +45,8 @@ namespace Core::Nx2Debug {
 using nlohmann::json;
 using namespace std::chrono_literals;
 
+/// Composites one luma_watch arms at most (60 s at 60 presents/s).
+constexpr u32 MAX_LUMA_WATCH = 3600;
 /// Lines the log ring keeps for log_tail.
 constexpr size_t RING_LINES = 20000;
 /// Bytes one read_memory or read_gpu_memory call returns at most.
@@ -1160,6 +1162,46 @@ json InputRecord(ToolState& state, const json& params) {
     throw std::runtime_error{"action must be start, status or stop"};
 }
 
+/// {presents?, cancel?, wait_s?}. presents arms the next composites for a (present, mean luma)
+/// sample each, through the screenshot path: a GPU-thread wait per composite while armed, so only
+/// outside measured input. Without presents it reads the samples, waiting up to wait_s for the
+/// watch to finish; cancel disarms first.
+json LumaWatch(ToolState& state, const json& params, const ClientGone& client_gone) {
+    for (const auto& [key, value] : params.items()) {
+        if (key != "presents" && key != "cancel" && key != "wait_s") {
+            throw std::runtime_error{
+                fmt::format("unknown key \"{}\": want presents, cancel or wait_s", key)};
+        }
+    }
+    if (params.contains("presents")) {
+        const json& presents = params.at("presents");
+        if (!presents.is_number_integer() || presents.get<s64>() < 1 ||
+            presents.get<u64>() > MAX_LUMA_WATCH) {
+            throw std::runtime_error{fmt::format("presents must be 1 to {}", MAX_LUMA_WATCH)};
+        }
+        VideoCore::Nx2Debug::ArmLumaWatch(presents.get<u32>());
+        return {{"armed", presents.get<u32>()},
+                {"present", g_nx2_present_count.load(std::memory_order_relaxed)}};
+    }
+    if (params.value("cancel", false)) {
+        VideoCore::Nx2Debug::ArmLumaWatch(0);
+        return {{"armed", 0}};
+    }
+    const int wait_s = Param<int>(params, "wait_s", 0, 0, 120);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{wait_s};
+    while (VideoCore::Nx2Debug::ReadLumaWatch().second != 0 &&
+           std::chrono::steady_clock::now() < deadline && !state.stopping.load() && !client_gone()) {
+        std::this_thread::sleep_for(5ms);
+    }
+    auto [samples, remaining] = VideoCore::Nx2Debug::ReadLumaWatch();
+    json list = json::array();
+    for (const auto& sample : samples) {
+        list.push_back(json::array(
+            {sample.present, std::round(static_cast<double>(sample.luma) * 100.0) / 100.0}));
+    }
+    return {{"samples", std::move(list)}, {"remaining", remaining}, {"done", remaining == 0}};
+}
+
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     const auto handler = [&state](json (*tool)(ToolState&, const json&)) -> Handler {
         return [state, tool](const json& params, const ClientGone&) { return tool(*state, params); };
@@ -1190,6 +1232,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},
         {"input_record", handler(InputRecord)},
+        {"luma_watch", waiting(LumaWatch)},
     };
 }
 

@@ -180,6 +180,27 @@ before it starts the callback thread, and the tool reads it after the callback
 (`RendererBase::ScreenshotPresent`). A Qt hotkey screenshot that completes between the two would
 overwrite it; the debug server itself is serial. It is 0 for games that never count presents.
 
+**`luma_watch`** `{presents?, cancel?, wait_s?}` finds a load's fade-in exactly, after the fact.
+`{presents: N}` (1 to 3600) arms the next N composites: each one renders a 256x144 copy of the
+frame through the screenshot path (`RenderLumaSample` next to `RenderScreenshot` in both
+renderers) and keeps `[present, mean luma]`, with the composite's guest present (as `screenshot`)
+and Rec. 601 luma from 0 to 255. The watch disarms itself after N samples. It answers at once:
+`{armed: N, present}`, where `present` is the present count now; composites can run a frame or
+two behind it. `{}` reads `{samples: [[present, luma], ...], remaining, done}`; `wait_s` (0 to 120)
+waits for `done` first. `{cancel: true}` disarms. Arming again replaces the samples, and the end
+of the session disarms.
+
+While armed it stalls the GPU thread at every composite: `RenderToBuffer` ends with
+`scheduler.Finish()`, so each present waits for the GPU and costs some ms more. Use it only outside
+measured input, around a load and its fade-in. With the game's FPS add-ons off, the game advances
+one step per present, so a slower present there changes no game state. Disarmed, the cost is one
+relaxed atomic load per composite. Composites of a minimized Vulkan window take no sample
+(`RendererVulkan::Composite` returns before the screenshot when the window is not shown), so the
+watch waits until the window is shown again. Typical use: arm before the walk into a loading zone,
+read with `wait_s` after the fade-in, take the first present after black (mean luma below 8)
+whose next samples are not black either, then `input_sequence` with `start_present` set from
+it. `cancel` as soon as the anchor is found keeps the stalls short.
+
 **`log_tail`** `{after?, limit?, contains?}`. A `RingBackend` in `src/common/logging.cpp:308`
 keeps the last 20,000 formatted lines. It is an ordinary backend that `FmtLogMessageImpl` already
 fans out to (`logging.cpp:488`), and it does nothing while its capacity is 0, which is the

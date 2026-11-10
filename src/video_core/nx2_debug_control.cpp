@@ -8,6 +8,7 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "core/core.h"
 #include "video_core/nx2_debug_control.h"
 
 namespace VideoCore::Nx2Debug {
@@ -32,6 +33,13 @@ State state;
 std::atomic<bool> pending{};
 std::atomic<bool> any_rejected{};
 
+struct LumaWatch {
+    std::mutex mutex;
+    std::vector<LumaSample> samples;
+};
+LumaWatch luma_watch;
+std::atomic<u32> luma_remaining{};
+
 void UpdatePending() {
     pending.store(!state.captures.empty() || !state.gpu_reads.empty() || state.reject_pending, std::memory_order_relaxed);
 }
@@ -54,6 +62,7 @@ void BeginSession() {
 }
 
 void EndSession() {
+    ArmLumaWatch(0);
     {
         std::scoped_lock lock{state.mutex};
         state.open = false;
@@ -229,6 +238,50 @@ bool WaitRejectApplied(u64 generation, std::chrono::milliseconds timeout) {
     return state.changed.wait_for(lock, timeout, [generation] {
         return !state.open || state.applied_generation >= generation;
     }) && state.applied_generation >= generation;
+}
+
+void ArmLumaWatch(u32 composites) {
+    std::scoped_lock lock{luma_watch.mutex};
+    luma_watch.samples.clear();
+    luma_watch.samples.reserve(composites);
+    luma_remaining.store(composites, std::memory_order_relaxed);
+}
+
+std::pair<std::vector<LumaSample>, u32> ReadLumaWatch() {
+    std::scoped_lock lock{luma_watch.mutex};
+    return {luma_watch.samples, luma_remaining.load(std::memory_order_relaxed)};
+}
+
+bool LumaWatchArmed() noexcept {
+    return luma_remaining.load(std::memory_order_relaxed) != 0;
+}
+
+void AddLumaSample(u64 present, std::span<const u8> bgra) {
+    const float luma = MeanLuma(bgra);
+    std::scoped_lock lock{luma_watch.mutex};
+    const u32 remaining = luma_remaining.load(std::memory_order_relaxed);
+    if (remaining == 0) {
+        return;
+    }
+    luma_watch.samples.push_back({.present = present, .luma = luma});
+    luma_remaining.store(remaining - 1, std::memory_order_relaxed);
+}
+
+void AddLumaSample(std::span<const u8> bgra) {
+    AddLumaSample(Core::g_nx2_composite_present.load(std::memory_order_relaxed), bgra);
+}
+
+float MeanLuma(std::span<const u8> bgra) {
+    const size_t pixels = bgra.size() / 4;
+    if (pixels == 0) {
+        return 0.0f;
+    }
+    // Rec. 601 weights in 1/256: 0.114 B + 0.587 G + 0.299 R.
+    u64 sum = 0;
+    for (size_t index = 0; index < pixels * 4; index += 4) {
+        sum += u64{29} * bgra[index] + u64{150} * bgra[index + 1] + u64{77} * bgra[index + 2];
+    }
+    return static_cast<float>(static_cast<double>(sum) / (256.0 * static_cast<double>(pixels)));
 }
 
 } // namespace VideoCore::Nx2Debug
