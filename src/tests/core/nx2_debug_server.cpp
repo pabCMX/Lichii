@@ -1060,9 +1060,63 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
             json{{"features",
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
-                   "landed_present", "screenshot_present", "luma_watch", "npad_sync"}},
+                   "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
+                   "step_frames", "time_control", "time_trace", "switches"}},
                  {"kit", 2},
                  {"kit_hooks", true}});
+}
+
+namespace {
+std::vector<u64> g_traced_presents;
+void CountTrace(u64 present) {
+    g_traced_presents.push_back(present);
+}
+} // Anonymous namespace
+
+TEST_CASE("A recording and the step trace share the present reply hook",
+          "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    const auto old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        Core::Nx2Debug::SetPresentReplyTrace(nullptr);
+        if (Core::g_nx2_present_hook.load() != nullptr) {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}}));
+        }
+        Core::g_nx2_present_count = old_count;
+    };
+    g_traced_presents.clear();
+    const auto present = [] {
+        const u64 count = ++Core::g_nx2_present_count;
+        if (const auto hook = Core::g_nx2_present_hook.load()) {
+            hook(count);
+        }
+        if (const auto hook = Core::g_nx2_present_reply_hook.load()) {
+            hook(count);
+        }
+        return count;
+    };
+    // The trace first, then a recording: both run at each reply.
+    Core::Nx2Debug::SetPresentReplyTrace(CountTrace);
+    REQUIRE(Core::g_nx2_present_reply_hook.load() != nullptr);
+    static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "start"}}));
+    const u64 first = present();
+    const u64 second = present();
+    // The recording's stop keeps the hook for the trace.
+    REQUIRE(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}})["presents"] == 2);
+    REQUIRE(Core::g_nx2_present_reply_hook.load() != nullptr);
+    const u64 third = present();
+    // A recording started during the trace, and the trace ending first: the recording goes on.
+    static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "start"}}));
+    Core::Nx2Debug::SetPresentReplyTrace(nullptr);
+    REQUIRE(Core::g_nx2_present_reply_hook.load() != nullptr);
+    present();
+    REQUIRE(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}})["presents"] == 1);
+    REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
+    REQUIRE(g_traced_presents == std::vector<u64>{first, second, third});
 }
 
 TEST_CASE("Input recordings take the stick at the present's reply", "[core][nx2_debug_server]") {
