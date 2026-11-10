@@ -163,6 +163,13 @@ struct Png {
 [[nodiscard]] nlohmann::json CallTool(System& system, std::string_view method,
                                       const nlohmann::json& params);
 
+/// The frontend's input recording hotkey: runs input_record with action "start", "status" or
+/// "stop" and returns its reply. Throws std::runtime_error as the method does.
+[[nodiscard]] nlohmann::json RecordInput(System& system, std::string_view action);
+
+/// Whether a debug server runs now. The frontend's input recording hotkey is off otherwise.
+[[nodiscard]] bool IsServiceRunning();
+
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
 [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,
                                                          u64 program_id);
