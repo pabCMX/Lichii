@@ -25,6 +25,7 @@ add_executable(tests
     core/nx2_thread_stats.cpp
     core/nx2_debug_server.cpp
     core/nx2_zip.cpp
+    core/oot_time_control.cpp
     core/nx2_present_pacer.cpp
     core/nx2_fence_action.cpp
     core/nx2_frame_interval.cpp

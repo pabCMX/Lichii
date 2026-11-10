@@ -27,6 +27,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_cached.h"
+#include "core/file_sys/oot_time_control.h"
 #include "core/file_sys/vfs/vfs_layered.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -946,6 +947,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             Settings::SetAppliedOcarinaRenderScale(patch.dlss_quality);
         }
     }
+    OotTimeControl::Apply(OotTimeControl::Requested(), nso, out, title_id, name, build_id);
 
     if (out.size() < sizeof(Loader::NSOHeader)) {
         return nso;
