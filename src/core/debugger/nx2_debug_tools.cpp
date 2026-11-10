@@ -15,6 +15,7 @@
 #include <iterator>
 #include <numeric>
 #include <thread>
+#include <tuple>
 
 #include "common/fs/path_util.h"
 #include "common/scope_exit.h"
@@ -49,7 +50,13 @@ constexpr u64 MAX_READ = 64 * 1024;
 /// Presented frames one input or input_sequence call holds at most (10 minutes at 60 fps).
 constexpr u64 MAX_INPUT_FRAMES = 36000;
 constexpr u64 MAX_INPUT_MS = 600'000;
-constexpr size_t MAX_INPUT_STEPS = 1000;
+/// Steps per input_sequence call. A step with both sticks and two buttons is about 110 bytes, so
+/// 6000 steps fit the 1 MB request limit (nx2_debug_server.cpp): 100 s of a stick that moves at
+/// every present at 60 presents/s.
+constexpr size_t MAX_INPUT_STEPS = 6000;
+/// Presents one measured input holds at most: the present-time ring, less 256 presents of margin
+/// for presents that land while the measurement is read.
+constexpr u64 MAX_MEASURED_PRESENTS = std::tuple_size_v<decltype(g_nx2_present_times_ns)> - 256;
 
 constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
     {"A", HID::NpadButton::A},         {"B", HID::NpadButton::B},
@@ -317,7 +324,7 @@ json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refr
 }
 
 json ReadInputFrameTimes(u64 first, u64 total, u64 begin_ns, u64 end_ns) {
-    if (first == 0 || total == 0 || total > 2048 || first + total < first) {
+    if (first == 0 || total == 0 || total > MAX_MEASURED_PRESENTS || first + total < first) {
         throw std::runtime_error{"invalid measured input range"};
     }
     const u64 last = first + total - 1;
@@ -729,8 +736,9 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
                                              timed ? MAX_INPUT_MS : MAX_INPUT_FRAMES)};
     }
     const bool measure = params.value("measure", false);
-    if (measure && !timed && total > 2048) {
-        throw std::runtime_error{"measured input is limited to 2048 presents"};
+    if (measure && !timed && total > MAX_MEASURED_PRESENTS) {
+        throw std::runtime_error{
+            fmt::format("measured input is limited to {} presents", MAX_MEASURED_PRESENTS)};
     }
     auto& hid = state.system.HIDCore();
     HID::EmulatedController* controller = hid.GetEmulatedController(HID::NpadIdType::Player1);
@@ -819,7 +827,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         result["clock"] = "host_time";
     }
     if (measure) {
-        if (timed && (presents < 2 || presents > 2048)) {
+        if (timed && (presents < 2 || presents > MAX_MEASURED_PRESENTS)) {
             json empty = IntervalStats({}, 60.0, true, true);
             empty.update({{"supported", "held-input-v1"}, {"first_present", start},
                           {"last_present", start + presents - 1}, {"expected_intervals", 0},
