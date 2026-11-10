@@ -17,6 +17,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#include "common/nx2_kit_stall.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/gpu_dirty_memory_manager.h"
@@ -403,16 +404,20 @@ struct GPU::Impl {
         }
         // The guest present this composite shows, for the debug server's screenshot.
         const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+        const bool kit_hooks = Common::KitStall::HooksEnabled();
         pending_composite_fence = RequestSyncOperation(
-            [this, current_request_counter, num_fences, present,
+            [this, current_request_counter, num_fences, present, kit_hooks,
              composite_layers = std::move(layers), composite_fences = std::move(fences)] {
                 if (num_fences == 0) {
-                    Core::g_nx2_composite_present.store(present, std::memory_order_relaxed);
+                    if (kit_hooks) {
+                        Core::g_nx2_composite_present.store(present, std::memory_order_relaxed);
+                    }
                     renderer->Composite(composite_layers);
                     return;
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
-                const auto executer = [this, current_request_counter, present, composite_layers]() {
+                const auto executer = [this, current_request_counter, present, kit_hooks,
+                                       composite_layers]() {
                     {
                         std::unique_lock<std::mutex> lk(request_swap_mutex);
                         if (--request_swap_counters[current_request_counter] != 0) {
@@ -420,7 +425,9 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
-                    Core::g_nx2_composite_present.store(present, std::memory_order_relaxed);
+                    if (kit_hooks) {
+                        Core::g_nx2_composite_present.store(present, std::memory_order_relaxed);
+                    }
                     renderer->Composite(composite_layers);
                 };
                 for (size_t i = 0; i < num_fences; i++) {

@@ -35,6 +35,8 @@ Debug-server parameters and methods, in `src/core/debugger/nx2_debug_tools.cpp`:
 - `npad_sync` (default on): one npad update at each present's reply while a frame-step call or a
   recording in mode `any` runs (`HID::UpdateNpadNow`), so the game reads the present's step;
   `stale_presents` names where the race would have hit.
+- Kit stall log (`KIT STALL` Error lines from a watchdog while the kit is active), the kit line
+  at server start, and the kill switch `EDEN_NX2_KIT_HOOKS=0` (debug-mcp.md, "If the kit hangs").
 - `luma_watch` keeps `[present, mean luma]` for the next N composites, to find a fade-in
   exactly. It stalls the GPU thread per present while armed (`RenderLumaSample` in both
   renderers, state in `video_core/nx2_debug_control`).

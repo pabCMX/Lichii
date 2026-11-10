@@ -20,6 +20,7 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/graphics_context.h"
+#include "common/nx2_kit_stall.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
@@ -530,6 +531,7 @@ void RendererVulkan::RenderLumaSample(std::span<const Tegra::FramebufferConfig> 
     if (!VideoCore::Nx2Debug::LumaWatchArmed()) {
         return;
     }
+    const Common::KitStall::Scope stall{"GPU readback", "luma sample"};
     const auto layers = Tegra::FilterLayerStack(
         framebuffers, Service::Nvnflinger::LayerStackId::Default, luma_layer_scratch);
     const auto layout = Layout::DefaultFrameLayout(VideoCore::Nx2Debug::LumaWatchWidth,

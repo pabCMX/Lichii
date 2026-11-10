@@ -18,10 +18,13 @@
 #include <numeric>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 
 #include "common/fs/path_util.h"
 #include "common/scope_exit.h"
+#include "common/thread.h"
 #include "common/logging.h"
+#include "common/nx2_kit_stall.h"
 #include "common/nx2_sampler.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
@@ -740,6 +743,138 @@ std::pair<HID::EmulatedController*, std::string> InputController(ToolState& stat
     throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
 }
 
+/// A kit lock with its stall breadcrumb (common/nx2_kit_stall.h): waits, then holds.
+class KitLock {
+public:
+    KitLock(std::mutex& mutex, const char* name, const char* op)
+        : stall{name, op}, lock{mutex} {
+        stall.Held();
+    }
+
+private:
+    Common::KitStall::Scope stall;
+    std::unique_lock<std::mutex> lock;
+};
+
+/// What the kit runs now, for the watchdog: a recording, input calls, a luma watch.
+std::atomic<bool> recording_active{};
+std::atomic<int> input_calls{};
+
+std::string KitActive() {
+    std::string active;
+    const auto add = [&active](std::string_view name) {
+        active += active.empty() ? "" : " ";
+        active += name;
+    };
+    if (recording_active.load(std::memory_order_relaxed)) {
+        add("record");
+    }
+    if (input_calls.load(std::memory_order_relaxed) != 0) {
+        add("injector");
+    }
+    if (VideoCore::Nx2Debug::LumaWatchArmed()) {
+        add("luma");
+    }
+    return active;
+}
+
+/// Names kit stalls in the log while the kit is active (docs/nx2/debug-mcp.md, "If the kit
+/// hangs"): every 250 ms it checks the breadcrumbs, and logs one Error line per stall older than
+/// EDEN_NX2_KIT_STALL_MS (default 2000), again every 10 s while it lasts.
+class Watchdog {
+public:
+    ~Watchdog() {
+        Stop();
+    }
+
+    /// Starts the thread unless it runs. Call after marking the kit active.
+    void Ensure() {
+        std::scoped_lock lock{mutex};
+        if (running) {
+            return;
+        }
+        if (thread.joinable()) {
+            thread.join();
+        }
+        stop = false;
+        running = true;
+        thread = std::thread{[this] { Loop(); }};
+    }
+
+    void Stop() {
+        stop = true;
+        std::thread done;
+        {
+            std::scoped_lock lock{mutex};
+            done = std::move(thread);
+        }
+        if (done.joinable()) {
+            done.join();
+        }
+    }
+
+private:
+    void Loop() {
+        Common::SetCurrentThreadName("KitWatchdog");
+        static const u64 limit_ns = [] {
+            const char* const text = std::getenv("EDEN_NX2_KIT_STALL_MS");
+            const long ms = text != nullptr ? std::strtol(text, nullptr, 10) : 0;
+            return static_cast<u64>(ms > 0 ? ms : 2000) * 1'000'000;
+        }();
+        std::unordered_map<u64, u64> reported;
+        while (!stop) {
+            std::this_thread::sleep_for(250ms);
+            const u64 now = Common::KitStall::NowNs();
+            const auto stalls = Common::KitStall::Check(limit_ns, now);
+            const std::string active = KitActive();
+            for (const auto& stall : stalls) {
+                auto [it, fresh] = reported.try_emplace(stall.key, now);
+                if (!fresh && now - it->second < 10'000'000'000ULL) {
+                    continue;
+                }
+                it->second = now;
+                LOG_ERROR(Debug, "KIT STALL: {}; present count {}; active: {}", stall.text,
+                          g_nx2_present_count.load(std::memory_order_relaxed),
+                          active.empty() ? "none" : active);
+                if (!first_reported) {
+                    first_reported = true;
+                    if (const auto hook = Common::KitStall::g_first_stall_hook.load()) {
+                        hook();
+                    }
+                }
+            }
+            if (stalls.empty() && active.empty()) {
+                std::scoped_lock lock{mutex};
+                if (KitActive().empty()) {
+                    running = false;
+                    return;
+                }
+            }
+        }
+        std::scoped_lock lock{mutex};
+        running = false;
+    }
+
+    std::mutex mutex;
+    std::thread thread;
+    bool running{};
+    bool first_reported{};
+    std::atomic<bool> stop{};
+};
+
+Watchdog& GetWatchdog() {
+    static Watchdog watchdog;
+    return watchdog;
+}
+
+/// Refuses a kit feature when EDEN_NX2_KIT_HOOKS=0.
+void RequireKitHooks(std::string_view feature) {
+    if (!Common::KitStall::HooksEnabled()) {
+        throw std::runtime_error{fmt::format(
+            "{} needs the kit's hooks, which EDEN_NX2_KIT_HOOKS=0 turned off", feature)};
+    }
+}
+
 void PresentReply(u64 present);
 
 /// g_nx2_present_reply_hook's users (a frame-step replay, a recording in mode "any"): the hook and
@@ -786,7 +921,7 @@ ReplaySync& GetReplaySync() {
 /// True when the replay wants the npad updated at this reply.
 bool NoteReplayReply(u64 present) {
     ReplaySync& sync = GetReplaySync();
-    std::scoped_lock lock{sync.mutex};
+    KitLock lock{sync.mutex, "replay sync mutex", __func__};
     if (!sync.active || present < sync.start || present >= sync.end) {
         return false;
     }
@@ -835,11 +970,17 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
             throw std::runtime_error{"start_present must be a present count of 1 or more"};
         }
         start_present = value.get<u64>();
+        RequireKitHooks("start_present");
     }
     if (params.contains("npad_sync") && !params.at("npad_sync").is_boolean()) {
         throw std::runtime_error{"npad_sync must be true or false"};
     }
-    const bool npad_sync = params.value("npad_sync", true);
+    const bool kit_hooks = Common::KitStall::HooksEnabled();
+    // Default on with the kit's hooks; asking for it without them fails.
+    const bool npad_sync = params.value("npad_sync", kit_hooks);
+    if (npad_sync) {
+        RequireKitHooks("npad_sync");
+    }
     const auto picked = InputController(state);
     HID::EmulatedController* const controller = picked.first;
     const std::string& name = picked.second;
@@ -861,9 +1002,14 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
             fmt::format("timeout_s {} does not exceed the {} ms of input", timeout, total)};
     }
     const auto begin = std::chrono::steady_clock::now();
-    if (!timed) {
+    input_calls.fetch_add(1, std::memory_order_relaxed);
+    GetWatchdog().Ensure();
+    SCOPE_EXIT {
+        input_calls.fetch_sub(1, std::memory_order_relaxed);
+    };
+    if (!timed && kit_hooks) {
         ReplaySync& sync = GetReplaySync();
-        std::scoped_lock lock{sync.mutex};
+        KitLock lock{sync.mutex, "replay sync mutex", __func__};
         sync.active = true;
         sync.sync = npad_sync;
         sync.start = start;
@@ -872,10 +1018,10 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         UseReplyHook();
     }
     SCOPE_EXIT {
-        if (!timed) {
+        if (!timed && kit_hooks) {
             ReplaySync& sync = GetReplaySync();
             {
-                std::scoped_lock lock{sync.mutex};
+                KitLock lock{sync.mutex, "replay sync mutex", __func__};
                 sync.active = false;
             }
             DropReplyHook();
@@ -955,9 +1101,11 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     } else if (measure || start_present) {
         result["landed_present"] = landed;
         result["npad_sync"] = npad_sync;
-        ReplaySync& sync = GetReplaySync();
-        std::scoped_lock lock{sync.mutex};
-        result["stale_presents"] = sync.stale;
+        if (kit_hooks) {
+            ReplaySync& sync = GetReplaySync();
+            KitLock lock{sync.mutex, "replay sync mutex", __func__};
+            result["stale_presents"] = sync.stale;
+        }
     }
     if (measure) {
         if (timed && (presents < 2 || presents > MAX_MEASURED_PRESENTS)) {
@@ -1139,7 +1287,7 @@ bool CloseCount(Recorder& recorder) {
 void RecordPresent(u64 present) {
     const auto counted = std::chrono::steady_clock::now();
     Recorder& recorder = GetRecorder();
-    std::scoped_lock lock{recorder.mutex};
+    KitLock lock{recorder.mutex, "recorder mutex", __func__};
     if (!recorder.recording || recorder.recording->Truncated() ||
         present < recorder.recording->StartPresent() ||
         (recorder.open && present <= recorder.open->present)) {
@@ -1164,7 +1312,7 @@ void RecordPresent(u64 present) {
 /// after which the game reads its next input, and the time it was blocked.
 void RecordPresentReply(u64 present) {
     Recorder& recorder = GetRecorder();
-    std::scoped_lock lock{recorder.mutex};
+    KitLock lock{recorder.mutex, "recorder mutex", __func__};
     if (!recorder.open || recorder.open->present != present) {
         return;
     }
@@ -1185,7 +1333,7 @@ void RecordPresentReply(u64 present) {
 /// out, so scripted input of the next count never leaks into this one.
 void RecordNpadRead(const HID::EmulatedController& controller) {
     Recorder& recorder = GetRecorder();
-    std::scoped_lock lock{recorder.mutex};
+    KitLock lock{recorder.mutex, "recorder mutex", __func__};
     if (!recorder.open || std::ranges::find(recorder.sources, &controller) == recorder.sources.end()) {
         return;
     }
@@ -1203,7 +1351,7 @@ void RecordNpadRead(const HID::EmulatedController& controller) {
 /// Mode "any" with npad_sync: whether the open count wants the npad updated at its reply.
 bool RecordingWantsSync(u64 present) {
     Recorder& recorder = GetRecorder();
-    std::scoped_lock lock{recorder.mutex};
+    KitLock lock{recorder.mutex, "recorder mutex", __func__};
     return recorder.npad_sync && recorder.open && recorder.open->present == present;
 }
 
@@ -1222,8 +1370,9 @@ void PresentReply(u64 present) {
 /// the controllers for it any more.
 void StopRecording() {
     Recorder& recorder = GetRecorder();
-    std::scoped_lock lock{recorder.mutex};
+    KitLock lock{recorder.mutex, "recorder mutex", __func__};
     ClearRecordHooks(recorder);
+    recording_active.store(false, std::memory_order_relaxed);
     recorder.recording.reset();
     recorder.at_count.reset();
     recorder.open.reset();
@@ -1243,6 +1392,7 @@ json InputRecord(ToolState& state, const json& params) {
     const std::string action = action_value.is_string() ? action_value.get<std::string>() : "";
     Recorder& recorder = GetRecorder();
     if (action == "start") {
+        RequireKitHooks("input_record");
         const std::string mode = params.value("mode", std::string{"any"});
         if (mode != "any" && mode != "sample") {
             throw std::runtime_error{"mode must be any or sample"};
@@ -1252,7 +1402,7 @@ json InputRecord(ToolState& state, const json& params) {
         }
         const bool npad_sync = params.value("npad_sync", true);
         const auto picked = InputController(state);
-        std::scoped_lock lock{recorder.mutex};
+        KitLock lock{recorder.mutex, "recorder mutex", __func__};
         if (recorder.recording) {
             throw std::runtime_error{fmt::format(
                 "already recording since present {}; stop it first",
@@ -1274,6 +1424,8 @@ json InputRecord(ToolState& state, const json& params) {
         }
         recorder.recording.emplace(g_nx2_present_count.load(std::memory_order_relaxed) + 1,
                                    MAX_INPUT_FRAMES, MAX_INPUT_STEPS);
+        recording_active.store(true, std::memory_order_relaxed);
+        GetWatchdog().Ensure();
         if (recorder.any) {
             recorder.at_count.emplace(recorder.recording->StartPresent(), MAX_INPUT_FRAMES,
                                       MAX_INPUT_STEPS);
@@ -1288,7 +1440,7 @@ json InputRecord(ToolState& state, const json& params) {
     }
     if (action == "status") {
         json controllers = ControllerStates(RecordedControllers(state));
-        std::scoped_lock lock{recorder.mutex};
+        KitLock lock{recorder.mutex, "recorder mutex", __func__};
         if (!recorder.recording) {
             return {{"recording", false}, {"controllers", std::move(controllers)}};
         }
@@ -1310,11 +1462,12 @@ json InputRecord(ToolState& state, const json& params) {
         bool npad_sync{};
         u64 blocked_sum_us{}, blocked_max_us{}, blocked_presents{};
         {
-            std::scoped_lock lock{recorder.mutex};
+            KitLock lock{recorder.mutex, "recorder mutex", __func__};
             if (!recorder.recording) {
                 throw std::runtime_error{"not recording"};
             }
             ClearRecordHooks(recorder);
+            recording_active.store(false, std::memory_order_relaxed);
             // The count running now ends here: its step holds what the game got so far.
             static_cast<void>(CloseCount(recorder));
             any = recorder.any;
@@ -1367,6 +1520,7 @@ json LumaWatch(ToolState& state, const json& params, const ClientGone& client_go
                 fmt::format("unknown key \"{}\": want presents, cancel or wait_s", key)};
         }
     }
+    RequireKitHooks("luma_watch");
     if (params.contains("presents")) {
         const json& presents = params.at("presents");
         if (!presents.is_number_integer() || presents.get<s64>() < 1 ||
@@ -1374,6 +1528,7 @@ json LumaWatch(ToolState& state, const json& params, const ClientGone& client_go
             throw std::runtime_error{fmt::format("presents must be 1 to {}", MAX_LUMA_WATCH)};
         }
         VideoCore::Nx2Debug::ArmLumaWatch(presents.get<u32>());
+        GetWatchdog().Ensure();
         return {{"armed", presents.get<u32>()},
                 {"present", g_nx2_present_count.load(std::memory_order_relaxed)}};
     }
@@ -1399,10 +1554,14 @@ json LumaWatch(ToolState& state, const json& params, const ClientGone& client_go
 /// What this build's debug server supports beyond origin, so a client can tell an older exe,
 /// which ignores unknown parameters, apart. Raise kit when the kit's contract changes.
 json Features(ToolState&, const json&) {
+    if (!Common::KitStall::HooksEnabled()) {
+        return {{"features", {"input_ms", "measure"}}, {"kit", 2}, {"kit_hooks", false}};
+    }
     return {{"features",
              {"input_ms", "measure", "input_record", "record_mode", "start_present",
               "landed_present", "screenshot_present", "luma_watch", "npad_sync"}},
-            {"kit", 2}};
+            {"kit", 2},
+            {"kit_hooks", true}};
 }
 
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
@@ -1763,6 +1922,10 @@ Service::Service(System& system, std::string title, u64 program_id, const Endpoi
     running_services.fetch_add(1, std::memory_order_relaxed);
     LOG_INFO(Debug, "Debug server listening on {}:{}, dump dir {}", endpoint.host, server->Port(),
              state->dump_directory.generic_string());
+    const json features = Features(*state, json::object());
+    LOG_INFO(Debug, "Debug server kit {}, kit hooks {}, features {}", features["kit"].dump(),
+             features["kit_hooks"].get<bool>() ? "on" : "off (EDEN_NX2_KIT_HOOKS=0)",
+             features["features"].dump());
 }
 
 Service::~Service() {
@@ -1771,6 +1934,7 @@ Service::~Service() {
     // After the server, whose one thread runs every handler, so no input_record start follows.
     server.reset();
     StopRecording();
+    GetWatchdog().Stop();
 }
 
 std::unique_ptr<Service> MaybeStartService(System& system, std::string title, u64 program_id) {

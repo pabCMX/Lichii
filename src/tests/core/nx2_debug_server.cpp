@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include <boost/asio.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/nx2_kit_stall.h"
 #include "common/page_table.h"
 #include "common/scope_exit.h"
 #include "core/core.h"
@@ -1053,7 +1055,8 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
             json{{"features",
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
                    "landed_present", "screenshot_present", "luma_watch", "npad_sync"}},
-                 {"kit", 2}});
+                 {"kit", 2},
+                 {"kit_hooks", true}});
 }
 
 TEST_CASE("Input recordings take the stick at the present's reply", "[core][nx2_debug_server]") {
@@ -1169,4 +1172,72 @@ TEST_CASE("Debug input names the presents whose newest npad entry was older than
     REQUIRE_THROWS(Core::Nx2Debug::CallTool(
         system, "input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", "yes"}}));
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
+}
+
+TEST_CASE("Kit stall breadcrumbs name the waiter, the lock and its holder",
+          "[core][nx2_debug_server]") {
+    std::atomic<int> ready{};
+    std::atomic<bool> release{};
+    const auto park = [&](bool holds, const char* op) {
+        return std::thread{[&, holds, op] {
+            Common::KitStall::Scope stall{"test lock", op};
+            if (holds) {
+                stall.Held();
+            }
+            ++ready;
+            while (!release) {
+                std::this_thread::sleep_for(1ms);
+            }
+        }};
+    };
+    std::thread holder = park(true, "hold op");
+    std::thread waiter = park(false, "wait op");
+    while (ready < 2) {
+        std::this_thread::sleep_for(1ms);
+    }
+    std::this_thread::sleep_for(20ms);
+    const auto stalls = Common::KitStall::Check(10'000'000, Common::KitStall::NowNs());
+    release = true;
+    holder.join();
+    waiter.join();
+    const auto found = std::ranges::find_if(stalls, [](const auto& stall) {
+        return stall.text.find("has waited") != std::string::npos;
+    });
+    REQUIRE(found != stalls.end());
+    CAPTURE(found->text);
+    REQUIRE(found->text.find("for test lock in wait op") != std::string::npos);
+    REQUIRE(found->text.find("; held by ") != std::string::npos);
+    REQUIRE(found->text.find(" in hold op for ") != std::string::npos);
+    // Under the limit, and after the scopes end, nothing is reported.
+    REQUIRE(Common::KitStall::Check(60'000'000'000, Common::KitStall::NowNs()).empty());
+}
+
+TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    Common::KitStall::SetHooksEnabled(false);
+    SCOPE_EXIT {
+        Common::KitStall::SetHooksEnabled(true);
+    };
+    const auto refused = [&](std::string_view method, const json& params) {
+        try {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, method, params));
+        } catch (const std::runtime_error& error) {
+            return std::string_view{error.what()}.find("EDEN_NX2_KIT_HOOKS=0") !=
+                   std::string_view::npos;
+        }
+        return false;
+    };
+    REQUIRE(refused("input_record", {{"action", "start"}}));
+    REQUIRE(refused("luma_watch", {{"presents", 5}}));
+    REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}},
+                                       {"start_present", Core::g_nx2_present_count.load() + 100}}));
+    REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", true}}));
+    REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
+    REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
+    REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
+            json{{"features", {"input_ms", "measure"}}, {"kit", 2}, {"kit_hooks", false}});
 }

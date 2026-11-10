@@ -10,6 +10,7 @@
 #include <ranges>
 #include "common/thread.h"
 #include "common/assert.h"
+#include "common/nx2_kit_stall.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/frontend/input_converter.h"
 #include "hid_core/hid_util.h"
@@ -1860,7 +1861,9 @@ AnalogSticks EmulatedController::GetSticks() const {
 }
 
 void EmulatedController::SetInputInjector(InputInjector injector_) {
+    Common::KitStall::Scope stall{"injector mutex", "SetInputInjector"};
     std::scoped_lock lock{injector_mutex};
+    stall.Held();
     injector = std::move(injector_);
     has_injector.store(static_cast<bool>(injector), std::memory_order_release);
 }
@@ -1869,7 +1872,9 @@ std::optional<InjectedInput> EmulatedController::Injected() const {
     if (!has_injector.load(std::memory_order_acquire)) {
         return std::nullopt;
     }
+    Common::KitStall::Scope stall{"injector mutex", "Injected"};
     std::scoped_lock lock{injector_mutex};
+    stall.Held();
     return injector ? injector() : std::nullopt;
 }
 
