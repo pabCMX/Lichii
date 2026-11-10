@@ -62,7 +62,8 @@ paused frame.
 | `scale` | 0.01 to 4 | its own step times `value` |
 | `fixed` | 0.01 to 6 | `value / 60` s of game time, whatever the frame time |
 
-Without `mode` it only reports. It returns `{address, mode, value?, previous}`.
+Without `mode` it only reports. It returns `{address, mode, value?, previous}`, and `trace`
+while a step trace runs or was asked for (see "Step trace").
 
 Units. The game's step is not a plain time. It is in ticks of `s1` Hz, where `s1` is 30 or 60 and
 differs between callers: the original is `s1 / s0` (`s0` the frame-rate field), and FPS Unlock
@@ -106,7 +107,7 @@ With `EDEN_NX2_OOT_TIME_CONTROL` set at boot, `PatchManager::PatchNSO` calls
 
 - `main+0x6E6CC4`: `bl 0x3C46300` (`8F 7D D5 94`), in place of the original `fdiv s8, s1, s0`
   or the add-ons' `bl 0x3C46200`.
-- `main+0x3C46300`: a 96-byte routine, in the executable padding between the end of text
+- `main+0x3C46300`: a 188-byte routine, in the executable padding between the end of text
   (`0x3C461D0`) and read-only data (`0x3C47000`).
 
 ```
@@ -119,7 +120,16 @@ With `EDEN_NX2_OOT_TIME_CONTROL` set at boot, `PatchManager::PatchNSO` calls
 plain:   fdiv s8, s1, s0           ; the original instruction
 scale:   adrp x10, 0x4E9F000
          add  x10, x10, #0xF00     ; control block, main+0x4E9FF00
-         ldr  w11, [x10]
+         ldr  w11, [x10, #16]      ; step trace: before the mode
+         ldr  w12, tmagic
+         cmp  w11, w12
+         b.ne mode
+         ldr  w11, [x10, #20]      ; count
+         and  w11, w11, #7
+         add  x11, x10, x11, lsl #4
+         stp  s1, s0, [x11, #32]   ; record count % 8: s1, s0,
+         str  s8, [x11, #40]       ; and the game's own step
+mode:    ldr  w11, [x10]
          ldr  w12, magic
          cmp  w11, w12
          b.ne done                 ; no magic: leave the step alone
@@ -128,18 +138,30 @@ scale:   adrp x10, 0x4E9F000
          cmp  w11, #1
          b.ne 1f
          fmul s8, s8, s3           ; scale
-         ret
+         b    done
 1:       cmp  w11, #2
          b.ne done
          ldr  s2, inv60            ; fixed: value * s1 / 60, in the caller's s1-Hz units
          fmul s3, s3, s1
          fmul s8, s3, s2
-done:    ret
+done:    ldr  w11, [x10, #16]      ; step trace: after the mode
+         ldr  w12, tmagic
+         cmp  w11, w12
+         b.ne out
+         ldr  w11, [x10, #20]
+         and  w12, w11, #7
+         add  x12, x10, x12, lsl #4
+         str  s8, [x12, #44]       ; the step returned
+         add  w11, w11, #1
+         str  w11, [x10, #20]      ; then the count: the record is complete first
+out:     ret
 magic:   .word 0x524E5254          ; "TRNR"
 inv60:   .float 0.016666668
+tmagic:  .word 0x45435254          ; "TRCE"
 ```
 
-Assembled with `clang --target=aarch64-linux-gnu` (108 bytes). It reads s1 and keeps it. It clobbers x10 to x12, s2, s3 and the flags,
+Assembled with `clang --target=aarch64-linux-gnu` (188 bytes; the first eight words are the
+encoded add-on call and `adrp`, as before). It reads s1 and keeps it. It clobbers x10 to x12, s2, s3 and the flags,
 which the add-on routines already clobber at this hook (`docs/nx2/ocarina-dynamic-fps.md`), and
 x30, which the hook's `bl` already clobbers. It saves x30 on the stack around the nested call.
 Because it checks the add-on routine at run time, it works with FPS Unlock, Dynamic FPS, or
@@ -151,7 +173,8 @@ Guards, as for the built-ins. Any failure skips the whole time control, with a l
 - title `0400486024DEC000`, module `main`, build id `E0F3CCFAF5...3348`;
 - the original word at the hook is `fdiv s8, s1, s0`, and the patched word is that or the
   add-on call (a user mod on the hook wins);
-- the cave is zero-filled executable padding; the 16-byte control block is zero-filled BSS.
+- the cave is zero-filled executable padding; the 16-byte control block and the 144-byte step
+  trace after it are zero-filled BSS (BSS ends at `0x4EA0000`, so 96 bytes stay free after them).
 
 On success the log shows `Applying time control to main (around the step add-on | around the
 game's own step; control block main+0x4e9ff00)`. The NSO loader then records the block's guest
@@ -166,6 +189,50 @@ is mapped and starts at zero, not that the game never uses it. The live checklis
 during play.
 
 The method is the only write. There is no general memory-write method.
+
+### Step trace
+
+The question it answers: what does the game do by itself? Live test H53 (pair-03 x8, off against
+`fixed 1`) could not show that the hook changed the game's time, because `fixed 1` equals the
+game's own step while its frame-rate field `s0` stays 60. The trace shows, per present, how often
+the game computes its step, with which `s1` (the caller's unit) and `s0`, its own step and the
+step it was given.
+
+`time_control {trace: N}` arms it for N presents (1 to 36000; 0 stops it). It works in every mode,
+`off` included: the hook from `EDEN_NX2_OOT_TIME_CONTROL=1` then passes the step through, and the
+trace sees the game's own values. It can be armed in the same call as a mode.
+`time_control {trace_read: true}` returns the summary with the records; `{trace: 0}` stops and
+returns them too. A plain report while it runs returns the summary only.
+
+```
+trace: {armed, presents, wanted, calls, dropped, first_present, last_present,
+        calls_per_present: {"<calls in one present>": presents, ...},
+        s1, s0, own_step, step: {min, max, distinct (at most 32), more_distinct, nan},
+        records: [[present, s1, s0, own_step, step], ...]}   (the first 256)
+```
+
+How. The routine keeps its last 8 calls in the BSS after the control block (`main+0x4E9FF10`:
+`u32 magic, u32 count`, 8 reserved bytes, then 8 records of `f32 s1, s0, own step, step`). It
+writes a record's inputs and own step before the mode, the step returned after it, and only then
+counts the call. At each present a present hook of its own (`g_nx2_present_trace_hook`; the
+`input_record` hook is apart, so both can run) copies the calls since the last present and stamps
+them with that present. After N presents the host writes the off magic and the routine stops.
+
+Off by default and cheap when off: the routine loads and compares one word twice per call, and no
+host hook runs. The method refuses a trace area that is not zero and has neither trace magic: the
+game would own it.
+
+What it can miss, and says so:
+
+- More than 7 calls in one present: only the newest 7 are read (the eighth slot can be in the
+  middle of the next call). The others count in `dropped`, and `calls_per_present` still has the
+  full count.
+- The first call after the arm is skipped: it can be half written.
+- Callers are told apart only by `s1`. The routine does not read the call stack.
+- A record's present is the present at which the host read it: the call happened after the
+  previous present and before that one.
+- If two guest threads called the routine at once, one record could mix their values. The game
+  is not known to do that.
 
 ### Unknowns
 
@@ -250,9 +317,9 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
 `EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545` and `EDEN_NX2_OOT_TIME_CONTROL=1`:
 
 1. Log: `Applying time control to main (...)` once per boot, and no `Skipping time control`.
-2. Before any `time_control` call, `read_memory {address: <address from time_control>, size: 16}`
-   at the title screen and after 5 minutes of play: all zero. A non-zero value means the game uses
-   the block: stop and report.
+2. Before any `time_control` call, `read_memory {address: <address from time_control>, size: 160}`
+   at the title screen and after 5 minutes of play: all zero (the block and the step trace after
+   it). A non-zero value means the game uses that memory: stop and report.
 3. `pause`: the Qt menu shows paused, `status.paused` is true. `resume`: both clear.
 4. `step_frames {frames: 1}` ten times: each `advanced` is 1 to 3, the game is paused after
    each. Then `step_frames {frames: 1, capture: true}` five times: each advances 2 presents and
@@ -293,6 +360,14 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
    `false` stops it. Then `ipc_trace` (one line per service command) on and off.
 12. Speed: with the variable unset and no trainer calls, the Base + kit build matches the Base
     within run-to-run noise on the standard route (the ship condition).
+13. Step trace, the game alone (H53's question): mode `off`, both FPS add-ons off. Arm
+    `time_control {trace: 600}` and walk and turn the camera for 10 s, then `{trace_read: true}`.
+    Report `calls_per_present`, the distinct `s1` and `s0`, `own_step` against `step` (equal in
+    `off`), and `dropped`. Then the same with `fixed 1` and with `fixed 2`: `step` is
+    `value * s1 / 60` for each `s1`, and `own_step` is what `off` gave. If `s0` stays 60 in every
+    record, `fixed 1` cannot differ from `off`, and H53's two arms were the same. Repeat once
+    with a load in the 10 s (a door) and once with FPS Unlock on, where `own_step` follows the
+    frame time.
 
 ## Open risks
 
@@ -300,6 +375,7 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
   stack push below `sp` at the hook. Compiled code keeps `sp` 16-byte aligned, and AArch64 has no
   red zone, so this is safe if the function follows the ABI. The live test confirms it.
 - The block may be game-owned BSS. The method refuses a block that is not zero and has no magic,
-  but a game write after the trainer set the magic is not detected.
+  but a game write after the trainer set the magic is not detected. The same holds for the step
+  trace area after it.
 - `step_frames` from the Qt frontend depends on the GUI thread running the queued slot. If the
   GUI thread is blocked (a modal dialog), pause times out with an error, not a hang.
