@@ -262,14 +262,26 @@ For a test orchestrator, on the Windows build of `explore/trainer-kit`, with
 5. `time_control {mode: "scale", value: 0.5}`: Link walks at half speed. `value: 2`: double.
    `off`: normal.
 6. Whole fixed steps FIRST, from a fresh boot, both FPS add-ons off: `fixed 1`, `fixed 2`,
-   `fixed 3`, each held 30 s while walking and turning the camera, then `off`. After each hold
-   and after `off`, search the log for `Unmapped` lines (`log_tail {contains: "Unmapped"}`): there
-   must be none. Record presents/s per hold. Expected: `fixed 1` as the game's own speed at 60
-   FPS, `fixed 2` as real play at 30 FPS, `fixed 3` as at 20 FPS. Any unmapped line ends the
-   ladder; that boot proves nothing more.
+   `fixed 3`, each held 30 s while walking and turning the camera, then `off`. Record presents/s
+   per hold. Expected: `fixed 1` as the game's own speed at 60 FPS, `fixed 2` as real play at 30
+   FPS, `fixed 3` as at 20 FPS.
+
+   Unmapped reads are counted, not banned. A save load prints about 16 `Unmapped` lines with time
+   control off (HTPC, 2026-11-10), so one such line does not end the ladder. Before the first
+   hold, take the OFF baseline in the same boot: do the hold's actions with `off` (the same load,
+   if a hold includes one, and 30 s of walking and camera) and count the `Unmapped` lines
+   (`log_tail {after, contains: "Unmapped"}` from the line before the action). Then count each
+   hold the same way. A hold fails only when:
+   - its count for an action is above the OFF count for the same action in this boot, or
+   - any `Unmapped` line comes during steady play (walking and camera, with no load, menu or
+     cutscene in that time).
+
+   Record the counts per hold and action next to the baseline. A failed hold ends the ladder;
+   that boot proves nothing more.
 7. Then fractional steps, each from a fresh boot after a clean whole-step ladder: `fixed 0.5`,
    `0.1`, `0.01`, then `scale` 0.25, 0.1, 0.01, each 30 s with walking and camera, then `off`, with
-   the same `Unmapped` check. `fixed 0` and anything below 0.01 must be refused by the server.
+   the same `Unmapped` counts against the OFF baseline of that boot. `fixed 0` and anything below
+   0.01 must be refused by the server.
 8. With FPS Unlock on, `fixed 2`: game speed follows the frame rate (game time 1/30 s per frame),
    as with both add-ons off.
 9. Benchmark mode: record a clip with `fixed 2` set before the save load, replay it 3 times with
