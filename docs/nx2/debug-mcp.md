@@ -595,6 +595,10 @@ present path no longer reads the controller.
 
 ### Phase 2: control and input (about 4 to 5 days)
 
+Done in the trainer kit, a layer on top of the Base (`explore/trainer-kit`,
+[trainer-kit.md](trainer-kit.md)): pause, resume and step_frames as below, a `switches` method
+for four observer switches, and `time_control` for Ocarina's step.
+
 - **pause, resume, step_frames.** The core has `System::Pause` and `Run` (`src/core/core.cpp:279`).
   The frontends own the run state, though: Qt's `EmuThread` decides when to call `Run`, so a
   server that called `Pause` directly would desynchronise the UI. The frontend registers
