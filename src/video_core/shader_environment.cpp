@@ -42,6 +42,7 @@
 #include "video_core/native_lowering.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/render_trace.h"
 #include "video_core/shader_cache_v2/cache.h"
 #include "video_core/shader_cache_v2/records.h"
 #include "video_core/shader_environment.h"
@@ -517,7 +518,7 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
         return entry;
     }
     if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
-        std::getenv("EDEN_NX2_RENDER_TRACE")) {
+        VideoCommon::RenderTrace::Enabled()) {
         static std::atomic<u32> traces{};
         if (traces.fetch_add(1, std::memory_order_relaxed) < 64) {
             LOG_WARNING(HW_GPU,

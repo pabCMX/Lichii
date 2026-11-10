@@ -33,6 +33,7 @@
 #include "common/dkb_frame_trace.h"
 #include "common/game_presets.h"
 #include "common/memory_detect.h"
+#include "common/nx2_live_switch.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -1722,8 +1723,7 @@ private:
 };
 
 inline bool Nx2VideoTraceEnabled() {
-    static const bool enabled = std::getenv("EDEN_NX2_VDEC_TRACE") != nullptr;
-    return enabled;
+    return Common::Nx2Live::g_vdec_trace();
 }
 
 // Native memory and images handed out by the Switch 2 graphics server (gsv 111/114/423/429/315),
