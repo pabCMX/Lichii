@@ -287,6 +287,12 @@ TOOLS = [
         },
     },
     {
+        "name": "features",
+        "description": "What this build's debug server supports beyond origin: {features: "
+                       "[...], kit}. An older exe answers 'unknown method'.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "luma_watch",
         "description": "Finds a load's fade-in exactly: {presents: N} arms the next N composites "
                        "(1-3600) for a [present, mean luma 0-255] sample each; {} reads them, "

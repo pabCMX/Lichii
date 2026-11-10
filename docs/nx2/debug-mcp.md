@@ -180,6 +180,14 @@ before it starts the callback thread, and the tool reads it after the callback
 (`RendererBase::ScreenshotPresent`). A Qt hotkey screenshot that completes between the two would
 overwrite it; the debug server itself is serial. It is 0 for games that never count presents.
 
+**`features`** `{}` answers `{features: [...], kit}`: what this build supports beyond origin.
+An older exe ignores parameters it does not know (`input_sequence {start_present: N}` then starts
+at the next present), so a client reads `features` first. An exe without the method answers
+"unknown method": it is older than the list. The names are `input_ms` (`ms` steps), `measure`,
+`input_record`, `record_mode` (`mode` any or sample), `start_present`, `landed_present`,
+`screenshot_present` and `luma_watch`. `kit` is 1 and rises when the contract of a listed
+feature changes. `status` stays as origin's.
+
 **`luma_watch`** `{presents?, cancel?, wait_s?}` finds a load's fade-in exactly, after the fact.
 `{presents: N}` (1 to 3600) arms the next N composites: each one renders a 256x144 copy of the
 frame through the screenshot path (`RenderLumaSample` next to `RenderScreenshot` in both

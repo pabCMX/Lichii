@@ -107,7 +107,7 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(names, ["status", "frame_times", "screenshot", "log_tail", "log_filter", "capture_frame",
                                  "capture_image", "capture_bundle", "reject_shaders", "sample", "read_memory",
                                  "search_memory", "read_gpu_memory", "input",
-                                 "input_sequence", "input_record", "luma_watch",
+                                 "input_sequence", "input_record", "features", "luma_watch",
                                  "host_timing", "trace_record",
                                  "trace_stop", "trace_status"])
         self.assertEqual(self.adapter.handle({"id": 3, "method": "bogus"})["error"]["code"], -32601)

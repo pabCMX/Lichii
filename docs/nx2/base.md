@@ -30,6 +30,7 @@ Debug-server parameters and methods, in `src/core/debugger/nx2_debug_tools.cpp`:
   Ctrl+F8, starts and stops it and saves the steps to `<user dir>/tas/present-record-<n>.json`.
 - `start_present` on `input` and `input_sequence` puts step 0 at that present; `screenshot`
   answers the present it captured.
+- `features` lists what the build supports (`kit` 1), so a client can tell an older exe apart.
 - `luma_watch` keeps `[present, mean luma]` for the next N composites, to find a fade-in
   exactly. It stalls the GPU thread per present while armed (`RenderLumaSample` in both
   renderers, state in `video_core/nx2_debug_control`).
