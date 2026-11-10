@@ -26,6 +26,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 BUTTONS = ["A", "B", "X", "Y", "L", "R", "ZL", "ZR", "Plus", "Minus", "Up", "Down", "Left", "Right",
            "StickL", "StickR"]
+START_PRESENT = {"type": "integer", "minimum": 1,
+                 "description": "Step 0 at exactly this present count instead of the next one; "
+                                "fails if it has passed. The reply's landed_present proves it."}
 STICK = {"type": "array", "items": {"type": "number", "minimum": -1, "maximum": 1},
          "minItems": 2, "maxItems": 2, "description": "[x, y], up is +y"}
 
@@ -237,7 +240,8 @@ TOOLS = [
                 "right_stick": STICK,
                 "frames": {"type": "integer", "minimum": 1, "maximum": 36000},
             },
-                           "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900}},
+                           "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900},
+                           "start_present": START_PRESENT},
             "required": ["frames"],
         },
     },
@@ -259,6 +263,7 @@ TOOLS = [
             },
                                     "required": ["frames"]}},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900},
+                "start_present": START_PRESENT,
             },
             "required": ["steps"],
         },
@@ -380,6 +385,9 @@ def default_timeout(name, params):
         return math.ceil(params.get("seconds", 5)) + 1
     if name == "sample":
         return int(params.get("seconds", 10)) + 90
+    if name in ("input", "input_sequence") and "start_present" in params:
+        # The lead before start_present is not known here: wait as long as the server may.
+        return 900
     if name in ("input", "input_sequence"):
         steps = params.get("steps", []) if name == "input_sequence" else [params]
         return sum(int(step.get("frames", 0)) for step in steps) // 20 + 10

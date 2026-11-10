@@ -368,6 +368,23 @@ coverage. Include these edges when assessing stalls, and report interval coverag
 from elapsed-window throughput. A window with too few or too many presents returns incomplete
 measurement statistics, not evidence of smooth playback.
 
+**`start_present`** (frame steps only, `input` and `input_sequence`) puts step 0 at exactly
+that present instead of the next one. The call installs the injector at once with
+`start = start_present`; the injector answers by the present count and gives nothing before
+`start` (`InputAt`), so the npad reads of that present already get step 0. No extra work runs on
+the present path. The call fails with "start_present N has passed" when the game is already at N
+or later, and refuses more than 36000 presents of lead. If present N is counted while the
+injector is being installed, the call fails with "present advanced while installing input" and
+releases the input. The default `timeout_s` counts the lead too. The adapter does not know the
+lead, so with `start_present` and no `timeout_s` it waits up to 900 s; a client with its own
+socket timeout must add the lead.
+
+Frame-step calls with `start_present` or `measure` also answer `landed_present`: the first
+present whose whole count had the injector. These calls refuse a start present that was counted
+while the injector was being installed, so `landed_present == first_present` whenever they
+succeed. A harness proves a landing error of 0 by checking `landed_present == start_present`. The
+plain reply stays as origin's.
+
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
 (`SCOPE_EXIT`): when the steps are done; on timeout (default `frames / 20 + 10` or

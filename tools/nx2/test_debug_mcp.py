@@ -152,6 +152,8 @@ class AdapterTest(unittest.TestCase):
 
     def test_input_waits_as_long_as_the_emulator(self):
         self.assertEqual(debug_mcp.default_timeout("input", {"frames": 600}), 40)
+        self.assertEqual(
+            debug_mcp.default_timeout("input", {"frames": 3, "start_present": 9000}), 900)
         sequence = {"steps": [{"frames": 300}, {"frames": 300, "buttons": ["A"]}]}
         self.assertEqual(debug_mcp.default_timeout("input_sequence", sequence), 40)
         self.assertEqual(debug_mcp.default_timeout("status", {}), 5)

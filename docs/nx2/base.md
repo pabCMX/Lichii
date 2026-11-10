@@ -28,10 +28,10 @@ Two debug-server parameters and one method, all in `src/core/debugger/nx2_debug_
   per call and 3840 measured presents. The Qt hotkey Record Input (Per Present), default
   Ctrl+F8, starts and stops it and saves the steps to `<user dir>/tas/present-record-<n>.json`.
 
-Both are described in [debug-mcp.md](debug-mcp.md) under "Input". Without `ms` or `measure`,
-nothing changes: the input injector (`EmulatedController::SetInputInjector`) is the origin code,
-and the response has the origin keys. The test "Debug input answers as before unless the client
-asks for ms or measure" in `src/tests/core/nx2_debug_server.cpp` checks this.
+Both are described in [debug-mcp.md](debug-mcp.md) under "Input". Without `ms`, `measure` or
+`start_present`, nothing changes: the input injector (`EmulatedController::SetInputInjector`) is
+the origin code, and the response has the origin keys. The test "Debug input answers as before
+unless the client asks for ms or measure" in `src/tests/core/nx2_debug_server.cpp` checks this.
 
 ## What the harness uses
 

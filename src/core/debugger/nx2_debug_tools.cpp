@@ -757,17 +757,40 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         throw std::runtime_error{
             fmt::format("measured input is limited to {} presents", MAX_MEASURED_PRESENTS)};
     }
+    // start_present: step 0 at exactly that present, for a clip synced to a present the client
+    // found. The injector answers by the present count, so installing it early is exact.
+    std::optional<u64> start_present;
+    if (params.contains("start_present")) {
+        const json& value = params.at("start_present");
+        if (timed) {
+            throw std::runtime_error{"start_present needs frame steps, not ms"};
+        }
+        if (!value.is_number_integer() || value.get<s64>() < 1) {
+            throw std::runtime_error{"start_present must be a present count of 1 or more"};
+        }
+        start_present = value.get<u64>();
+    }
     const auto picked = InputController(state);
     HID::EmulatedController* const controller = picked.first;
     const std::string& name = picked.second;
-    const u64 total_s = timed ? total / 1000 : total / 20;
+    const u64 counted = g_nx2_present_count.load(std::memory_order_relaxed);
+    if (start_present && *start_present <= counted) {
+        throw std::runtime_error{fmt::format(
+            "start_present {} has passed: the game is at present {}", *start_present, counted)};
+    }
+    if (start_present && *start_present - counted > MAX_INPUT_FRAMES) {
+        throw std::runtime_error{fmt::format("start_present {} is more than {} presents ahead of {}",
+                                             *start_present, MAX_INPUT_FRAMES, counted)};
+    }
+    const u64 start = start_present.value_or(counted + 1);
+    const u64 lead = start - counted - 1;
+    const u64 total_s = timed ? total / 1000 : (lead + total) / 20;
     const int timeout = Param<int>(params, "timeout_s", static_cast<int>(total_s + 10), 1, 900);
     if (timed && std::chrono::seconds{timeout} <= std::chrono::milliseconds{total}) {
         throw std::runtime_error{
             fmt::format("timeout_s {} does not exceed the {} ms of input", timeout, total)};
     }
     const auto begin = std::chrono::steady_clock::now();
-    const u64 start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
     const auto script = std::make_shared<const std::vector<InputStep>>(steps);
     if (timed) {
         controller->SetInputInjector([script, begin] {
@@ -784,7 +807,11 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     SCOPE_EXIT {
         controller->SetInputInjector({});
     };
-    if (measure && !timed && g_nx2_present_count.load(std::memory_order_relaxed) >= start) {
+    // The first present whose whole count had the injector: start, unless the start present
+    // was counted while it was installed.
+    const u64 installed_at = g_nx2_present_count.load(std::memory_order_relaxed);
+    const u64 landed = installed_at < start ? start : installed_at + 1;
+    if ((measure || start_present) && !timed && landed != start) {
         throw std::runtime_error{"present advanced while installing input; input released"};
     }
     const auto deadline = begin + std::chrono::seconds{timeout};
@@ -835,6 +862,8 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     if (timed) {
         result["ms"] = total;
         result["clock"] = "host_time";
+    } else if (measure || start_present) {
+        result["landed_present"] = landed;
     }
     if (measure) {
         if (timed && (presents < 2 || presents > MAX_MEASURED_PRESENTS)) {
@@ -867,6 +896,7 @@ json Input(ToolState& state, const json& params, const ClientGone& client_gone) 
     json step = params;
     step.erase("timeout_s");
     step.erase("measure");
+    step.erase("start_present");
     return RunInput(state, {ParseInputStep(step)}, params, client_gone);
 }
 
