@@ -1095,6 +1095,17 @@ json CallTool(System& system, std::string_view method, const json& params) {
     return handlers.at(std::string{method})(params, [] { return false; });
 }
 
+json RecordInput(System& system, std::string_view action) {
+    return CallTool(system, "input_record", {{"action", std::string{action}}});
+}
+
+/// Debug services alive; the Service constructor and destructor count them.
+static std::atomic<u32> running_services{};
+
+bool IsServiceRunning() {
+    return running_services.load(std::memory_order_relaxed) != 0;
+}
+
 u64 ParseShaderHash(std::string_view text) {
     const std::string_view digits =
         text.starts_with("0x") || text.starts_with("0X") ? text.substr(2) : text;
@@ -1396,12 +1407,14 @@ Service::Service(System& system, std::string title, u64 program_id, const Endpoi
                                         std::move(dump_directory))} {
     Common::Log::SetRingCapacity(RING_LINES);
     server = std::make_unique<Server>(endpoint, MakeHandlers(state));
+    running_services.fetch_add(1, std::memory_order_relaxed);
     LOG_INFO(Debug, "Debug server listening on {}:{}, dump dir {}", endpoint.host, server->Port(),
              state->dump_directory.generic_string());
 }
 
 Service::~Service() {
     state->stopping.store(true, std::memory_order_relaxed);
+    running_services.fetch_sub(1, std::memory_order_relaxed);
     // After the server, whose one thread runs every handler, so no input_record start follows.
     server.reset();
     StopRecording();
