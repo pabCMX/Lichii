@@ -6,6 +6,7 @@
 #include <array>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <utility>
@@ -84,9 +85,10 @@ public:
     /// Starts a trace of `presents` presents. count is the guest count at the arm: the call in
     /// progress then may be half written, so the first call is skipped.
     void Arm(u32 count, u64 presents);
-    /// One present's copy of the trace area. Returns false once the trace has its presents (the
-    /// caller then stops the guest side).
-    bool Add(u64 present, std::span<const u8> area);
+    /// One present's copy of the trace area. count_after is the guest count read again after the
+    /// copy: calls made during the copy may have overwritten records in it, and those are
+    /// dropped. Returns false once the trace has its presents (the caller then stops the guest).
+    bool Add(u64 present, std::span<const u8> area, std::optional<u32> count_after = std::nullopt);
     void Stop() {
         armed = false;
     }

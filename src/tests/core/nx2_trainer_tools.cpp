@@ -349,6 +349,24 @@ TEST_CASE("The step trace stamps calls with their present and sums them up", "[n
     REQUIRE_FALSE(trace.Summary(false).contains("records"));
 }
 
+TEST_CASE("The step trace drops records the guest overwrote during the copy", "[nx2_trainer]") {
+    using Core::Nx2Debug::StepTrace;
+    TraceArea area;
+    StepTrace trace;
+    trace.Arm(area.count, 10);
+    for (int i = 0; i < 7; ++i) {
+        area.Call(60, 60, 1, static_cast<float>(i)); // calls 0 (skipped) to 6
+    }
+    // Four more calls ran while the host copied: they overwrote calls 0 to 3 (and call 11 may be
+    // writing over call 3), so of calls 1 to 6 only 4 to 6 are intact.
+    REQUIRE(trace.Add(100, area.bytes, area.count + 4));
+    const json summary = trace.Summary(true);
+    REQUIRE(summary["calls"] == 3);
+    REQUIRE(summary["dropped"] == 3);
+    REQUIRE(summary["records"][0][4] == 4.0f);
+    REQUIRE(summary["calls_per_present"] == json{{"6", 1}});
+}
+
 TEST_CASE("time_control ramps a speed-up over 2x by doublings, one a present", "[nx2_trainer]") {
     using Core::Nx2Debug::TimeRamp;
     REQUIRE(TimeRamp(1.0f, 6.0f) == std::vector<float>{2.0f, 4.0f}); // off -> fixed 6: 2, 4, then 6
