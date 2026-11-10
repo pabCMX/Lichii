@@ -25,7 +25,8 @@ Two debug-server parameters and one method, all in `src/core/debugger/nx2_debug_
 - `measure: true` adds `measurement`: the present intervals of the held input.
 - `input_record` records the game's input once per present, as steps `input_sequence` replays
   (H48). It adds `g_nx2_present_hook` to the present path and raises the limits to 6000 steps
-  per call and 3840 measured presents.
+  per call and 3840 measured presents. The Qt hotkey Record Input (Per Present), default
+  Ctrl+F8, starts and stops it and saves the steps to `<user dir>/tas/present-record-<n>.json`.
 
 Both are described in [debug-mcp.md](debug-mcp.md) under "Input". Without `ms` or `measure`,
 nothing changes: the input injector (`EmulatedController::SetInputInjector`) is the origin code,

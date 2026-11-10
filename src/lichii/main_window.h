@@ -402,6 +402,9 @@ private slots:
     void OnTasStartStop();
     void OnTasRecord();
     void OnTasReset();
+    /// The "Record Input (Per Present)" hotkey: starts input_record, or stops it and saves the
+    /// steps to the TAS folder as present-record-<n>.json. Needs the debug server.
+    void OnPresentRecordToggle();
     void OnToggleGraphicsAPI();
     void OnToggleDockedMode();
     void OnToggleGpuAccuracy();
@@ -513,6 +516,8 @@ private:
     bool ConfirmShutdownGame();
 
     QString GetTasStateDescription() const;
+    /// Shows a running input_record, hotkey or debug-server started, in the status bar.
+    void UpdatePresentRecordLabel();
     bool CreateShortcutMessagesGUI(QWidget* parent, int imsg, const QString& game_title);
 
     /**
@@ -578,6 +583,7 @@ private:
     QLabel* dlss_status_label = nullptr;
     QLabel* emu_frametime_label = nullptr;
     QLabel* tas_label = nullptr;
+    QLabel* present_record_label = nullptr;
     QLabel* firmware_label = nullptr;
     QPushButton* gpu_accuracy_button = nullptr;
     QPushButton* renderer_status_button = nullptr;

@@ -8,9 +8,12 @@
 #undef VMA_IMPLEMENTATION
 #endif
 
+#include <filesystem>
+#include <fstream>
 #include <QSysInfo>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
+#include "core/debugger/nx2_debug_tools.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "common/shutdown_progress.h"
@@ -1051,6 +1054,12 @@ void MainWindow::InitializeWidgets() {
     tas_label->setFocusPolicy(Qt::NoFocus);
     statusBar()->insertPermanentWidget(0, tas_label);
 
+    present_record_label = new QLabel();
+    present_record_label->setObjectName(QStringLiteral("PresentRecordLabel"));
+    present_record_label->setStyleSheet(QStringLiteral("QLabel { color: #e53935; font-weight: bold; }"));
+    present_record_label->setFocusPolicy(Qt::NoFocus);
+    statusBar()->insertPermanentWidget(0, present_record_label);
+
     volume_popup = new QWidget(this);
     volume_popup->setWindowFlags(Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint | Qt::Popup);
     volume_popup->setLayout(new QVBoxLayout());
@@ -1465,6 +1474,8 @@ void MainWindow::InitializeHotkeys() {
         SetFPSSuffix();
     });
 
+    connect_shortcut(QStringLiteral("Record Input (Per Present)"),
+                     &MainWindow::OnPresentRecordToggle);
     connect_shortcut(QStringLiteral("Toggle Renderdoc Capture"), [] {
         if (Settings::values.enable_renderdoc_hotkey) {
             QtCommon::system->GetRenderdocAPI().ToggleCapture();
@@ -2729,6 +2740,7 @@ void MainWindow::OnEmulationStopped() {
     }
     game_list->SetFilterFocus();
     tas_label->clear();
+    present_record_label->clear();
     input_subsystem->GetTas()->Stop();
     OnTasStateChanged();
     render_window->FinalizeCamera();
@@ -5425,6 +5437,68 @@ void MainWindow::OnTasStateChanged() {
     ui->action_TAS_Reset->setEnabled(emulation_running);
 }
 
+void MainWindow::OnPresentRecordToggle() {
+    if (!emulation_running || !Core::Nx2Debug::IsServiceRunning()) {
+        statusBar()->showMessage(
+            tr("Input recording needs a running game and EDEN_NX2_DEBUG_SERVER"), 5000);
+        return;
+    }
+    try {
+        auto& system = *QtCommon::system;
+        if (!Core::Nx2Debug::RecordInput(system, "status")["recording"].get<bool>()) {
+            const auto started = Core::Nx2Debug::RecordInput(system, "start");
+            LOG_INFO(Frontend, "Input recording started at present {} on {}",
+                     started["start_present"].get<u64>(),
+                     started["controller"].get<std::string>());
+        } else {
+            const auto stopped = Core::Nx2Debug::RecordInput(system, "stop");
+            const auto directory = Common::FS::GetEdenPath(Common::FS::EdenPath::TASDir);
+            std::filesystem::create_directories(directory);
+            std::filesystem::path path;
+            for (int index = 1;; ++index) {
+                path = directory / fmt::format("present-record-{}.json", index);
+                if (!std::filesystem::exists(path)) {
+                    break;
+                }
+            }
+            std::ofstream file{path, std::ios::binary};
+            file << stopped.dump() << '\n';
+            file.close();
+            if (!file) {
+                throw std::runtime_error{fmt::format("cannot write {}", path.string())};
+            }
+            const auto presents = stopped["presents"].get<u64>();
+            LOG_INFO(Frontend, "Input recording of {} presents saved to {}{}", presents,
+                     path.string(), stopped["truncated"].get<bool>() ? " (truncated)" : "");
+            statusBar()->showMessage(tr("Input recording of %1 presents saved to %2")
+                                         .arg(presents)
+                                         .arg(QString::fromStdString(path.string())),
+                                     10000);
+        }
+    } catch (const std::exception& error) {
+        LOG_ERROR(Frontend, "Input recording: {}", error.what());
+        statusBar()->showMessage(tr("Input recording: %1").arg(QString::fromUtf8(error.what())),
+                                 10000);
+    }
+    UpdatePresentRecordLabel();
+}
+
+void MainWindow::UpdatePresentRecordLabel() {
+    if (!emulation_running || !Core::Nx2Debug::IsServiceRunning()) {
+        present_record_label->clear();
+        return;
+    }
+    const auto status = Core::Nx2Debug::RecordInput(*QtCommon::system, "status");
+    if (!status["recording"].get<bool>()) {
+        present_record_label->clear();
+        return;
+    }
+    present_record_label->setText(
+        tr("REC INPUT %1 presents%2")
+            .arg(status["presents"].get<u64>())
+            .arg(status["truncated"].get<bool>() ? tr(" (full)") : QString{}));
+}
+
 void MainWindow::UpdateStatusBar() {
     if (QtCommon::emu_thread == nullptr || !QtCommon::system->IsPoweredOn()) {
         status_bar_update_timer.stop();
@@ -5435,6 +5509,7 @@ void MainWindow::UpdateStatusBar() {
         tas_label->setText(GetTasStateDescription());
     else
         tas_label->clear();
+    UpdatePresentRecordLabel();
 
     auto results = QtCommon::system->GetAndResetPerfStats();
     auto& shader_notify = QtCommon::system->GPU().ShaderNotify();
