@@ -456,6 +456,16 @@ Replay notes:
 - `measure: true` covers at most 3840 presents (64 s at 60 presents/s): the present-time ring
   has 4096 slots, less 256 of margin.
 
+Hotkey: **Record Input (Per Present)** (default Ctrl+F8, Configure > Hotkeys) starts a
+recording, and pressed again stops it and saves the `stop` reply to the TAS folder
+(`<user dir>/tas/present-record-<n>.json`, the first free n). It works only while a game runs with
+`EDEN_NX2_DEBUG_SERVER` set. The status bar shows `REC INPUT <presents> presents` while any
+recording runs, also one the debug server started, and shows the saved path after stop. The
+hotkey and the debug server use the same recording: a `stop` from either one ends it. Leaving the
+game discards a running recording, so stop it first. A controller combo can be set for it in
+Configure > Hotkeys. Controller hotkeys read player 1 only (`MainWindow::LinkActionShortcut`), and
+every button of the combo except Home and Capture also goes to the game and into the recording.
+
 Threading: the hook, the handler and shutdown share one mutex. A recording is not tied to a
 client connection, so `start` and `stop` can come from different calls. A client that leaves
 mid-recording leaves it running until the limits, and the next `stop` ends it. When the game
