@@ -568,6 +568,28 @@ private:
     std::thread thread;
 };
 
+/// Calls the npad read hook for controller every 0.3 ms, like the npad updater, until destroyed.
+class FakeNpad {
+public:
+    explicit FakeNpad(const Core::HID::EmulatedController& controller)
+        : thread{[this, &controller] {
+              while (!stop) {
+                  if (const auto hook = Core::HID::g_npad_read_hook.load()) {
+                      hook(controller);
+                  }
+                  std::this_thread::sleep_for(300us);
+              }
+          }} {}
+    ~FakeNpad() {
+        stop = true;
+        thread.join();
+    }
+
+private:
+    std::atomic<bool> stop{};
+    std::thread thread;
+};
+
 } // Anonymous namespace
 
 TEST_CASE("Debug input answers as before unless the client asks for ms or measure",
@@ -744,6 +766,7 @@ TEST_CASE("Debug input recordings replay the input the game was given at each pr
     REQUIRE_THROWS(record("pause"));
 
     FakePresenter presenter;
+    FakeNpad npad{controller};
     // The game's input at each present of steps; a step without a stick leaves the owner's
     // stick, which is centred here.
     const auto per_present = [](const json& steps) {
@@ -888,4 +911,75 @@ TEST_CASE("Debug input recordings replay the input the game was given at each pr
         REQUIRE(input.left->x == 1000);
         REQUIRE(input.left->y == -2000);
     }
+}
+
+TEST_CASE("Input recordings hold presses shorter than a present unless the mode is sample",
+          "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    bool pressed = false;
+    controller.SetInputInjector([&pressed] {
+        return std::optional{Core::HID::InjectedInput{
+            .buttons = pressed ? Core::HID::NpadButton::Y : Core::HID::NpadButton::None,
+            .left = {},
+            .right = {}}};
+    });
+    const auto old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        if (Core::g_nx2_present_hook.load() != nullptr) {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}}));
+        }
+        controller.SetInputInjector({});
+        Core::g_nx2_present_count = old_count;
+    };
+    // Records one run: per count, the button state at its present and at each npad read after
+    // it. Returns whether Y is in the recording at each present.
+    const auto record = [&](std::string_view mode, const std::vector<std::vector<bool>>& counts) {
+        const json started = Core::Nx2Debug::CallTool(system, "input_record",
+                                                       {{"action", "start"}, {"mode", mode}});
+        REQUIRE(started["mode"] == mode);
+        for (const auto& reads : counts) {
+            pressed = reads.front();
+            const u64 present = ++Core::g_nx2_present_count;
+            if (const auto hook = Core::g_nx2_present_hook.load()) {
+                hook(present);
+            }
+            for (size_t index = 1; index < reads.size(); ++index) {
+                pressed = reads[index];
+                if (const auto hook = Core::HID::g_npad_read_hook.load()) {
+                    hook(controller);
+                }
+            }
+        }
+        const json stopped =
+            Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}});
+        REQUIRE(stopped["mode"] == mode);
+        REQUIRE(Core::HID::g_npad_read_hook.load() == nullptr);
+        std::vector<bool> held;
+        for (const json& step : stopped["steps"]) {
+            const auto parsed = Core::Nx2Debug::ParseInputStep(step);
+            held.insert(held.end(), parsed.frames,
+                        parsed.input.buttons == Core::HID::NpadButton::Y);
+        }
+        REQUIRE(held.size() == stopped["presents"].get<u64>());
+        REQUIRE(held.size() == counts.size());
+        return held;
+    };
+    // A tap that starts and ends inside the second count.
+    const std::vector<std::vector<bool>> tap{{false}, {false, true, false}, {false}, {false}};
+    REQUIRE(record("any", tap) == std::vector<bool>{false, true, false, false});
+    REQUIRE(record("sample", tap) == std::vector<bool>{false, false, false, false});
+    // A press from the middle of the second count to the middle of the fifth: "any" adds the
+    // count it began in, so the lengths differ by one present at most.
+    const std::vector<std::vector<bool>> hold{{false}, {false, true}, {true}, {true},
+                                              {true, false}, {false}};
+    REQUIRE(record("any", hold) == std::vector<bool>{false, true, true, true, true, false});
+    REQUIRE(record("sample", hold) == std::vector<bool>{false, false, true, true, true, false});
+    // Stop closes the count that is still running, with what it had so far.
+    REQUIRE(record("any", {{false}, {false, true}}) == std::vector<bool>{false, true});
+    REQUIRE_THROWS(Core::Nx2Debug::CallTool(system, "input_record",
+                                            {{"action", "start"}, {"mode", "every"}}));
 }

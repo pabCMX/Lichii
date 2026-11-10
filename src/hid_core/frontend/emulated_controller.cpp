@@ -15,6 +15,8 @@
 #include "hid_core/hid_util.h"
 
 namespace Core::HID {
+
+std::atomic<void (*)(const EmulatedController&)> g_npad_read_hook{};
 constexpr s32 HID_TRIGGER_MAX = 0x7fff;
 constexpr u32 TURBO_BUTTON_DELAY = 4;
 // Use a common UUID for TAS and Virtual Gamepad
