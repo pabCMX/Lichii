@@ -523,6 +523,10 @@ private:
     QString GetTasStateDescription() const;
     /// Shows a running input_record, hotkey or debug-server started, in the status bar.
     void UpdatePresentRecordLabel();
+    /// Shows message in the status bar's message label for milliseconds. Use it in place of
+    /// QStatusBar::showMessage, which draws left of the permanent widgets: they start at the
+    /// left edge here, so its text is not seen.
+    void ShowStatusMessage(const QString& message, int milliseconds);
     bool CreateShortcutMessagesGUI(QWidget* parent, int imsg, const QString& game_title);
 
     /**
@@ -612,6 +616,7 @@ private:
     QWidget* volume_popup = nullptr;
     QSlider* volume_slider = nullptr;
     QTimer status_bar_update_timer;
+    QTimer status_message_timer;
 
     // Stores what suffix to add to the FPS counter, e.g. Unlocked.
     QString m_fpsSuffix{};
