@@ -185,8 +185,10 @@ An older exe ignores parameters it does not know (`input_sequence {start_present
 at the next present), so a client reads `features` first. An exe without the method answers
 "unknown method": it is older than the list. The names are `input_ms` (`ms` steps), `measure`,
 `input_record`, `record_mode` (`mode` any or sample), `start_present`, `landed_present`,
-`screenshot_present`, `luma_watch` and `npad_sync`. `kit` is 2 (since `npad_sync`) and rises
-when the contract of a listed feature changes. `status` stays as origin's.
+`screenshot_present`, `luma_watch` and `npad_sync`, and with the trainer kit `pause`,
+`step_frames`, `time_control`, `time_trace` (`time_control {trace}`) and `switches`
+(trainer-kit.md). `kit` is 2 (since `npad_sync`) and rises when the contract of a listed feature
+changes. `status` stays as origin's.
 
 **`luma_watch`** `{presents?, cancel?, wait_s?}` finds a load's fade-in exactly, after the fact.
 `{presents: N}` (1 to 3600) arms the next N composites: each one renders a 256x144 copy of the
@@ -673,8 +675,9 @@ so every log names the kit the exe has.
 `EDEN_NX2_KIT_HOOKS=0` is the kill switch for a clean A/B. The server then installs none of the
 kit's hooks: `input_record`, `luma_watch`, `start_present` and an explicit `npad_sync: true` fail
 with an error that names the variable, frame-step calls run without the reply hook (no
-`npad_sync`, no `stale_presents`), the GPU does not store the composite present, and `features`
-answers `{features: ["input_ms", "measure"], kit, kit_hooks: false}`. Plain `input` and
+`npad_sync`, no `stale_presents`), the GPU does not store the composite present, the trainer's
+step trace (`time_control {trace}`) is refused, and `features` answers `{features: ["input_ms",
+"measure"]` plus the trainer methods but not `time_trace`, `kit, kit_hooks: false}`. Plain `input` and
 `input_sequence` still work: their injector is origin code. One relaunch with it tells whether a
 hang or a slowdown comes from the kit.
 

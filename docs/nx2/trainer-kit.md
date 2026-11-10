@@ -237,9 +237,11 @@ trace: {armed, presents, wanted, calls, dropped, first_present, last_present,
 How. The routine keeps its last 8 calls in the BSS after the control block (`main+0x4E9FF10`:
 `u32 magic, u32 count`, 8 reserved bytes, then 8 records of `f32 s1, s0, own step, step`). It
 writes a record's inputs and own step before the mode, the step returned after it, and only then
-counts the call. At each present a present hook of its own (`g_nx2_present_trace_hook`; the
-`input_record` hook is apart, so both can run) copies the calls since the last present and stamps
-them with that present. After N presents the host writes the off magic and the routine stops.
+counts the call. At each present's reply the kit's reply hook (`g_nx2_present_reply_hook`, which
+the frame-step replay and `input_record` share; `SetPresentReplyTrace` adds the trace to it, so a
+recording and a trace can run at once) copies the calls since the last present and stamps them
+with that present. `EDEN_NX2_KIT_HOOKS=0` refuses the trace; `features` lists it as
+`time_trace`. After N presents the host writes the off magic and the routine stops.
 
 Off by default and cheap when off: the routine loads and compares one word twice per call, and no
 host hook runs. The method refuses a trace area that is not zero and has neither trace magic: the

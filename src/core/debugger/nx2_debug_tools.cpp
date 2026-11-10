@@ -1635,13 +1635,18 @@ json LumaWatch(ToolState& state, const json& params, const ClientGone& client_go
 
 /// What this build's debug server supports beyond origin, so a client can tell an older exe,
 /// which ignores unknown parameters, apart. Raise kit when the kit's contract changes.
+/// The trainer methods (docs/nx2/trainer-kit.md) are listed too; time_trace (time_control
+/// {trace}) uses the present hook, so EDEN_NX2_KIT_HOOKS=0 leaves it out.
 json Features(ToolState&, const json&) {
     if (!Common::KitStall::HooksEnabled()) {
-        return {{"features", {"input_ms", "measure"}}, {"kit", 2}, {"kit_hooks", false}};
+        return {{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches"}},
+                {"kit", 2},
+                {"kit_hooks", false}};
     }
     return {{"features",
              {"input_ms", "measure", "input_record", "record_mode", "start_present",
-              "landed_present", "screenshot_present", "luma_watch", "npad_sync"}},
+              "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
+              "step_frames", "time_control", "time_trace", "switches"}},
             {"kit", 2},
             {"kit_hooks", true}};
 }
