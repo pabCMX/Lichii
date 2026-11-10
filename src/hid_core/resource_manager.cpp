@@ -508,14 +508,18 @@ std::atomic<bool> g_npad_update_stamps{};
 std::atomic<u64> g_npad_update_ns{};
 
 void ResourceManager::UpdateNpad(std::chrono::nanoseconds ns_late) {
-    if (g_npad_update_stamps.load(std::memory_order_relaxed)) {
-        g_npad_update_ns.store(static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                    std::chrono::steady_clock::now().time_since_epoch())
-                                                    .count()),
-                               std::memory_order_release);
-    }
+    const bool stamp = g_npad_update_stamps.load(std::memory_order_relaxed);
+    const u64 started_ns =
+        stamp ? static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count())
+              : 0;
     auto& core_timing = system.CoreTiming();
     npad->OnUpdate(system.Kernel(), core_timing);
+    // Published once its entries are written: an update still running counts as not done.
+    if (stamp) {
+        g_npad_update_ns.store(started_ns, std::memory_order_release);
+    }
 }
 
 void ResourceManager::UpdateMouseKeyboard(std::chrono::nanoseconds ns_late) {
