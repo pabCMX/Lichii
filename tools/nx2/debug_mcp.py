@@ -278,7 +278,11 @@ TOOLS = [
                        "'truncated' is true.",
         "inputSchema": {
             "type": "object",
-            "properties": {"action": {"type": "string", "enum": ["start", "status", "stop"]}},
+            "properties": {"action": {"type": "string", "enum": ["start", "status", "stop"]},
+                           "mode": {"type": "string", "enum": ["any", "sample"],
+                                    "description": "start only. any (default): every button "
+                                                   "given during a present. sample: the input "
+                                                   "at the present only."}},
             "required": ["action"],
         },
     },

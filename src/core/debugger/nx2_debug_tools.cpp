@@ -929,6 +929,15 @@ struct Recorder {
     std::array<HID::EmulatedController*, 2> sources{};
     std::string controller_name;
     std::optional<InputRecording> recording;
+    /// Mode "any" (default): a count's step holds every button the npad updater gave the game at
+    /// any time during that count. Mode "sample": the input at the start of the count only.
+    bool any{true};
+    /// Mode "any": the count still running, closed into the recording at the next present.
+    struct OpenCount {
+        u64 present;
+        HID::InjectedInput input;
+    };
+    std::optional<OpenCount> open;
 };
 
 Recorder& GetRecorder() {
@@ -994,40 +1003,91 @@ json ControllerStates(std::span<HID::EmulatedController* const> controllers) {
     return list;
 }
 
+void ClearRecordHooks() {
+    g_nx2_present_hook.store(nullptr, std::memory_order_release);
+    HID::g_npad_read_hook.store(nullptr, std::memory_order_release);
+}
+
+/// Mode "any": moves the open count into the recording. False once the recording is truncated.
+bool CloseCount(Recorder& recorder) {
+    if (!recorder.open) {
+        return true;
+    }
+    const Recorder::OpenCount open = *recorder.open;
+    recorder.open.reset();
+    return recorder.recording->Add(open.present, open.input);
+}
+
 /// g_nx2_present_hook while input_record records. Runs right after the present count becomes
-/// present, so it reads the input the injector and the owner's pad give for that count.
+/// present, so it reads the input the injector and the owner's pad give at the start of that
+/// count. Mode "any" then keeps the count open for the npad reads during it.
 void RecordPresent(u64 present) {
     Recorder& recorder = GetRecorder();
     std::scoped_lock lock{recorder.mutex};
-    if (!recorder.recording || recorder.recording->Truncated()) {
+    if (!recorder.recording || recorder.recording->Truncated() ||
+        present < recorder.recording->StartPresent() ||
+        (recorder.open && present <= recorder.open->present)) {
         return;
     }
-    if (!recorder.recording->Add(present, GameInput(recorder.sources))) {
-        g_nx2_present_hook.store(nullptr, std::memory_order_release);
+    const HID::InjectedInput input = GameInput(recorder.sources);
+    const bool kept =
+        recorder.any ? CloseCount(recorder) : recorder.recording->Add(present, input);
+    if (!kept) {
+        ClearRecordHooks();
+        return;
+    }
+    if (recorder.any) {
+        recorder.open = Recorder::OpenCount{.present = present, .input = input};
     }
 }
 
-/// Ends any recording without a result, so the present path no longer reads the controller.
+/// HID::g_npad_read_hook in mode "any": ORs the buttons the npad updater reads for the game into
+/// the open count. A read that may belong to another count (the count moved around it) is left
+/// out, so scripted input of the next count never leaks into this one.
+void RecordNpadRead(const HID::EmulatedController& controller) {
+    Recorder& recorder = GetRecorder();
+    std::scoped_lock lock{recorder.mutex};
+    if (!recorder.open || std::ranges::find(recorder.sources, &controller) == recorder.sources.end()) {
+        return;
+    }
+    const u64 before = g_nx2_present_count.load(std::memory_order_acquire);
+    if (before != recorder.open->present) {
+        return;
+    }
+    HID::InjectedInput input{};
+    AddGameInput(input, controller);
+    if (g_nx2_present_count.load(std::memory_order_acquire) == before) {
+        recorder.open->input.buttons |= input.buttons;
+    }
+}
+
+/// Ends any recording without a result, so neither the present path nor the npad updater reads
+/// the controllers for it any more.
 void StopRecording() {
     Recorder& recorder = GetRecorder();
     std::scoped_lock lock{recorder.mutex};
-    g_nx2_present_hook.store(nullptr, std::memory_order_release);
+    ClearRecordHooks();
     recorder.recording.reset();
+    recorder.open.reset();
     recorder.sources = {};
 }
 
-/// {action: "start" | "status" | "stop"}. Records the input the game is given at each present
-/// from the next one on; stop returns it as input_sequence steps.
+/// {action: "start" | "status" | "stop", mode?: "any" | "sample"}. Records the input the game
+/// is given at each present from the next one on; stop returns it as input_sequence steps.
 json InputRecord(ToolState& state, const json& params) {
     for (const auto& [key, value] : params.items()) {
-        if (key != "action") {
-            throw std::runtime_error{fmt::format("unknown key \"{}\": want action", key)};
+        if (key != "action" && key != "mode") {
+            throw std::runtime_error{fmt::format("unknown key \"{}\": want action or mode", key)};
         }
     }
     const json action_value = params.value("action", json{});
     const std::string action = action_value.is_string() ? action_value.get<std::string>() : "";
     Recorder& recorder = GetRecorder();
     if (action == "start") {
+        const std::string mode = params.value("mode", std::string{"any"});
+        if (mode != "any" && mode != "sample") {
+            throw std::runtime_error{"mode must be any or sample"};
+        }
         const auto picked = InputController(state);
         std::scoped_lock lock{recorder.mutex};
         if (recorder.recording) {
@@ -1037,14 +1097,20 @@ json InputRecord(ToolState& state, const json& params) {
         }
         recorder.sources = RecordedControllers(state);
         recorder.controller_name = picked.second;
-        // The hook goes in first. A present counted meanwhile waits for the lock, then is
+        recorder.any = mode == "any";
+        recorder.open.reset();
+        // The hooks go in first. A present counted meanwhile waits for the lock, then is
         // recorded or ignored by the start present read below, so none is lost.
         g_nx2_present_hook.store(RecordPresent, std::memory_order_release);
+        if (recorder.any) {
+            HID::g_npad_read_hook.store(RecordNpadRead, std::memory_order_release);
+        }
         recorder.recording.emplace(g_nx2_present_count.load(std::memory_order_relaxed) + 1,
                                    MAX_INPUT_FRAMES, MAX_INPUT_STEPS);
         return {{"recording", true},
                 {"start_present", recorder.recording->StartPresent()},
-                {"controller", picked.second}};
+                {"controller", picked.second},
+                {"mode", mode}};
     }
     if (action == "status") {
         json controllers = ControllerStates(RecordedControllers(state));
@@ -1054,21 +1120,26 @@ json InputRecord(ToolState& state, const json& params) {
         }
         return {{"recording", true},
                 {"start_present", recorder.recording->StartPresent()},
-                {"presents", recorder.recording->Presents()},
+                {"presents", recorder.recording->Presents() + (recorder.open ? 1 : 0)},
                 {"steps", recorder.recording->Steps().size()},
                 {"controller", recorder.controller_name},
+                {"mode", recorder.any ? "any" : "sample"},
                 {"truncated", recorder.recording->Truncated()},
                 {"controllers", std::move(controllers)}};
     }
     if (action == "stop") {
         std::optional<InputRecording> recording;
         std::string name;
+        bool any{};
         {
             std::scoped_lock lock{recorder.mutex};
             if (!recorder.recording) {
                 throw std::runtime_error{"not recording"};
             }
-            g_nx2_present_hook.store(nullptr, std::memory_order_release);
+            ClearRecordHooks();
+            // The count running now ends here: its step holds what the game got so far.
+            static_cast<void>(CloseCount(recorder));
+            any = recorder.any;
             recording = std::move(recorder.recording);
             recorder.recording.reset();
             recorder.sources = {};
@@ -1083,6 +1154,7 @@ json InputRecord(ToolState& state, const json& params) {
                 {"start_present", recording->StartPresent()},
                 {"end_present", recording->StartPresent() + recording->Presents() - 1},
                 {"controller", std::move(name)},
+                {"mode", any ? "any" : "sample"},
                 {"truncated", recording->Truncated()}};
     }
     throw std::runtime_error{"action must be start, status or stop"};

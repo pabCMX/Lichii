@@ -94,6 +94,11 @@ struct InjectedInput {
 /// Asked on every read of the npad buttons and sticks while installed: the input to apply now.
 using InputInjector = std::function<std::optional<InjectedInput>()>;
 
+class EmulatedController;
+/// Called by the npad updater for each controller it reads for the game, while set. Only the
+/// debug server's input_record sets it.
+extern std::atomic<void (*)(const EmulatedController&)> g_npad_read_hook;
+
 struct ControllerColors {
     NpadControllerColor fullkey{};
     NpadControllerColor left{};

@@ -420,16 +420,16 @@ presses. For an A/B test, run the same `input_sequence` from the same spot under
 
 ### Input recording (implemented)
 
-**`input_record`** `{action: "start" | "status" | "stop"}` records the input the game is given
+**`input_record`** `{action: "start" | "status" | "stop", mode?}` records the input the game is given
 at each present, so that `input_sequence` can replay it present for present. The frontend TAS
 recorder steps once per frame shown in the window (`GRenderWindow::OnFrameDisplayed`), not once
 per game present, so its clips drift when replayed with `input_sequence` (H48).
 
 | Action | Result |
 | --- | --- |
-| `start` | `{recording: true, start_present, controller}`. Fails while a recording runs. |
-| `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, truncated, controllers}`, where `steps` is a count. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
-| `stop` | `{steps: [...], presents, start_present, end_present, controller, truncated}`. Fails when nothing records. |
+| `start` | `{recording: true, start_present, controller, mode}`. `mode` is `"any"` (default) or `"sample"`, see below. Fails while a recording runs. |
+| `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, mode, truncated, controllers}`, where `steps` is a count. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
+| `stop` | `{steps: [...], presents, start_present, end_present, controller, mode, truncated}`. Fails when nothing records. The count still running is closed with what it had so far. |
 
 - `controller` is the controller a replay goes to: `player1`, or `handheld` when player 1 is
   not connected, the same choice `input` makes, made once at `start`. The recording itself reads
@@ -455,10 +455,31 @@ and each stick keeps the larger deflection. Both are read because they have sepa
 (`players[0]` and `players[8]`) and the npad updater gives the game every connected npad
 (`npad.cpp`, `RequestPadStateUpdate`): in handheld mode the owner's pad can drive the handheld
 npad while player 1 is connected and idle. The first live clips (v1.0.0a-20261109-10) read player
-1 only and lost the owner's input after 400 to 1900 presents. The injector also answers them by the present count, so for a replay
-the input read at present c is exactly what the game gets during count c. For the owner's own
-pad it is the state at the moment of present c. A press that starts later during count c shows
-from present c + 1 in the recording. When not recording, the cost is one atomic load per present.
+1 only and lost the owner's input after 400 to 1900 presents. The injector also answers them by
+the present count, so for a replay the input read at present c is exactly what the game gets
+during count c.
+
+Mode `"any"` (the default, and the hotkey's) also holds every button the game was given at any
+time during count c, from present c to present c + 1. The npad updater writes an entry for the
+game every 1 ms (`resource_manager.cpp`, `npad_update_ns`) into a 17-entry LIFO, about 28 entries
+per present at 35 FPS, and the owner's sword taps (Y) are often one present long or shorter. A
+sample at the start of the count alone missed such taps: a clip held 5 Y presses where the owner
+swung at least 6 times. While mode `"any"` records, `RequestPadStateUpdate` (`npad.cpp`) calls
+`HID::g_npad_read_hook` for each controller it reads for the game. The hook reads the same two
+getters and ORs the buttons into count c, but only when the present count is c before and after
+its read: a read that may belong to count c + 1 is left out, so scripted input of the next count
+never leaks into this one. Count c is closed into the recording at present c + 1, or at `stop`.
+Sticks are the value at the start of the count in both modes: the replay holds one stick value
+per count, and a stick moves continuously, so the start value lags by one present at most. The
+largest deflection would turn a short flick into a whole present at full tilt.
+
+Trade-off: if the game reads only the latest entry once per frame, mode `"any"` can add a press
+the game never saw (a press that began and ended between two of its reads). Which entries a game
+reads is not visible to the emulator: it reads the LIFO with its own code in shared memory, with
+no service call. Mode `"sample"` is the earlier behaviour: the input at the moment of present c
+only, so a press that starts later during count c shows from present c + 1. Use both on one
+fight clip to compare. When not recording, the cost is one atomic load per present and one per
+npad update.
 
 What is kept: the 16 input buttons and both sticks, after turbo and after any injected input.
 Stick direction bits (`StickL*`, `StickR*`) are not kept: the replay derives them from the
