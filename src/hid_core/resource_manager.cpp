@@ -483,7 +483,16 @@ void ResourceManager::UpdateControllers(std::chrono::nanoseconds ns_late) {
     capture_button->OnUpdate(core_timing);
 }
 
+std::atomic<bool> g_npad_update_stamps{};
+std::atomic<u64> g_npad_update_ns{};
+
 void ResourceManager::UpdateNpad(std::chrono::nanoseconds ns_late) {
+    if (g_npad_update_stamps.load(std::memory_order_relaxed)) {
+        g_npad_update_ns.store(static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    std::chrono::steady_clock::now().time_since_epoch())
+                                                    .count()),
+                               std::memory_order_release);
+    }
     auto& core_timing = system.CoreTiming();
     npad->OnUpdate(system.Kernel(), core_timing);
 }
