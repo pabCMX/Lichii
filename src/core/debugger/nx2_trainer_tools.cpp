@@ -100,10 +100,24 @@ void TracePresent(u64 present) {
     if (g_trace.memory == nullptr || !g_trace.trace.Armed()) {
         return;
     }
+    // The guest can run the routine during the copy: read the count again after it, and copy
+    // again while it moved (Add drops what the newer calls may have overwritten).
     std::array<u8, TC::TraceSize> area{};
-    if (ReadGuestMemory(*g_trace.memory, g_trace.address, area)) {
+    std::array<u8, 4> after{};
+    bool mapped = true;
+    for (int tries = 0; tries < 3; ++tries) {
+        if (ReadGuestMemory(*g_trace.memory, g_trace.address, area) ||
+            ReadGuestMemory(*g_trace.memory, g_trace.address + 4, after)) {
+            mapped = false;
+            break;
+        }
+        if (Load32(after, 0) == Load32(area, 4)) {
+            break;
+        }
+    }
+    if (!mapped) {
         g_trace.error = "the trace area is no longer mapped";
-    } else if (g_trace.trace.Add(present, area)) {
+    } else if (g_trace.trace.Add(present, area, Load32(after, 0))) {
         return;
     }
     g_trace.trace.Stop();
@@ -540,17 +554,21 @@ void StepTrace::Arm(u32 count, u64 presents_wanted) {
     wanted = presents_wanted;
 }
 
-bool StepTrace::Add(u64 present, std::span<const u8> area) {
+bool StepTrace::Add(u64 present, std::span<const u8> area, std::optional<u32> count_after) {
     namespace TC = FileSys::OotTimeControl;
     if (!armed || area.size() < TC::TraceSize) {
         return false;
     }
     const u32 count = Load32(area, 4);
-    // Calls since the last present. The newest record slot can be in the middle of the next
-    // call's first write, so at most TraceRecords - 1 are read; the rest are counted as dropped.
+    // Calls since the last present. Call j writes record j % 8 over call j - 8, and call
+    // `newest` (the count after the copy) can be in the middle of its first write, so only the
+    // calls after newest - 8 are intact: at most TraceRecords - 1 when the count held still. The
+    // rest are counted as dropped.
     const s32 fresh_signed = static_cast<s32>(count - next);
     const u32 fresh = fresh_signed > 0 ? static_cast<u32>(fresh_signed) : 0;
-    const u32 readable = (std::min<u32>)(fresh, TC::TraceRecords - 1);
+    const u32 newest = count_after.value_or(count);
+    const s32 intact = static_cast<s32>(count + (TC::TraceRecords - 1) - newest);
+    const u32 readable = (std::min<u32>)(fresh, intact > 0 ? static_cast<u32>(intact) : 0);
     dropped += fresh - readable;
     for (u32 call = count - readable; call != count; ++call) {
         const size_t at = 16 + (call % TC::TraceRecords) * TC::TraceRecordSize;
