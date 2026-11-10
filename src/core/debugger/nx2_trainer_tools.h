@@ -37,9 +37,16 @@ struct LiveSwitchInfo {
 /// The switches the "switches" method can flip, in the order it lists them.
 [[nodiscard]] std::span<const LiveSwitchInfo> LiveSwitches();
 
+/// Requests a frame capture (the next frame the GPU finishes) and returns its end: end(false)
+/// waits and answers as capture_frame does, end(true) withdraws the request. step_frames
+/// {capture} calls it while the game is paused.
+using CaptureStart =
+    std::function<std::function<nlohmann::json(bool cancel)>(const nlohmann::json& params)>;
+
 /// Adds the trainer methods to the server's table. stopping says that the session ends, so a
 /// waiting method returns early.
-void AddTrainerHandlers(Handlers& handlers, System& system, std::function<bool()> stopping);
+void AddTrainerHandlers(Handlers& handlers, System& system, std::function<bool()> stopping,
+                        CaptureStart capture = {});
 
 /// The run state the methods read: System::IsPoweredOn and IsPaused, or a test's own.
 struct RunState {
@@ -49,6 +56,6 @@ struct RunState {
 
 /// As above with a given run state (for tests).
 void AddTrainerHandlers(Handlers& handlers, System& system, RunState run,
-                        std::function<bool()> stopping);
+                        std::function<bool()> stopping, CaptureStart capture = {});
 
 } // namespace Core::Nx2Debug

@@ -30,7 +30,7 @@ constexpr u32 Magic = 0x524E5254; // "TRNR"
 enum class Mode : u32 {
     Off = 0,
     Scale = 1, ///< step * value
-    Fixed = 2, ///< value
+    Fixed = 2, ///< value / 60 s of game time per frame, in each caller's unit (value * s1 / 60)
 };
 
 /// Whether EDEN_NX2_OOT_TIME_CONTROL is set.

@@ -33,7 +33,9 @@ namespace {
 
 /// Presents one step_frames call runs at most (10 s at 60 fps).
 constexpr u64 MAX_STEP_FRAMES = 600;
-/// time_control limits. 6.0 is FPS Unlock's largest step (a 100 ms frame).
+/// time_control limits. 6.0 is FPS Unlock's largest step (a 100 ms frame). The game hangs on a
+/// step of 0 (live, 2026-11-10): no value below MIN_STEP, the smallest one tested live (scale).
+constexpr float MIN_STEP = 0.01f;
 constexpr float MAX_SCALE = 4.0f;
 constexpr float MAX_FIXED_STEP = 6.0f;
 
@@ -73,7 +75,12 @@ struct TrainerState {
     System& system;
     RunState run;
     std::function<bool()> stopping;
+    CaptureStart capture;
 };
+
+/// After a pause, the GPU may still finish the frames queued before it. A capture requested
+/// after this wait takes the next frame, the one the step presents.
+constexpr auto GPU_DRAIN = 100ms;
 
 u64 Presents() {
     return g_nx2_present_count.load(std::memory_order_relaxed);
@@ -141,7 +148,9 @@ json Resume(TrainerState& state, const json& params, const ClientGone& client_go
 }
 
 // Resumes until `frames` more guest presents, then pauses again. Present-granular: the pause
-// lands a present or two late, and the GPU drains a frame behind the CPU.
+// lands a present or two late, and the GPU drains a frame behind the CPU. With capture, the last
+// present is stepped on its own: the capture is requested while the game is paused and the GPU
+// has drained, so it takes the frame of exactly that present.
 json StepFrames(TrainerState& state, const json& params, const ClientGone& client_gone) {
     RequireGame(state);
     const json& value = params.at("frames");
@@ -150,25 +159,57 @@ json StepFrames(TrainerState& state, const json& params, const ClientGone& clien
         throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_STEP_FRAMES)};
     }
     const u64 frames = value.get<u64>();
+    const json capture = params.value("capture", json{false});
+    const bool capturing = capture.is_object() || (capture.is_boolean() && capture.get<bool>());
+    if (capturing && !state.capture) {
+        throw std::runtime_error{"this server cannot capture frames"};
+    }
     const auto timeout = Timeout(params, static_cast<int>(frames / 10 + 5));
     SetRunning(state, false, client_gone, 5s);
     const u64 start = Presents();
-    bool complete = false;
-    try {
-        SetRunning(state, true, client_gone, 5s);
-        complete = WaitFor(state, client_gone, timeout, [&] { return Presents() >= start + frames; });
-    } catch (const std::exception&) {
-        // The resume may still be queued in the frontend: queue a pause after it.
-        Control(false);
-        throw;
+    // Runs until n more presents than at its call, then pauses on every path, so a timeout or a
+    // lost client does not leave the game running.
+    const auto step = [&](u64 n) {
+        const u64 from = Presents();
+        bool done = false;
+        try {
+            SetRunning(state, true, client_gone, 5s);
+            done = WaitFor(state, client_gone, timeout, [&] { return Presents() >= from + n; });
+        } catch (const std::exception&) {
+            // The resume may still be queued in the frontend: queue a pause after it.
+            Control(false);
+            throw;
+        }
+        SetRunning(state, false, [] { return false; }, 5s);
+        return done;
+    };
+    bool complete = !capturing || frames == 1 ? true : step(frames - 1);
+    json result;
+    if (capturing && complete) {
+        std::this_thread::sleep_for(GPU_DRAIN);
+        const u64 before = Presents();
+        const auto end = state.capture(capture.is_object() ? capture : json::object());
+        try {
+            complete = step(1);
+        } catch (const std::exception&) {
+            end(true); // no capture of a later frame
+            throw;
+        }
+        if (!complete) {
+            end(true);
+            throw std::runtime_error{"the step did not present within the timeout; no capture"};
+        }
+        result["capture"] = end(false);
+        result["capture_present"] = before + 1;
+    } else if (!capturing) {
+        complete = step(frames);
     }
-    // Pause again on every path, so a timeout or a lost client does not leave the game running.
-    SetRunning(state, false, [] { return false; }, 5s);
-    return {{"requested", frames},
-            {"advanced", Presents() - start},
-            {"complete", complete},
-            {"paused", true},
-            {"presents", Presents()}};
+    result.update({{"requested", frames},
+                   {"advanced", Presents() - start},
+                   {"complete", complete},
+                   {"paused", true},
+                   {"presents", Presents()}});
+    return result;
 }
 
 const char* ModeName(u32 mode) {
@@ -223,8 +264,9 @@ json TimeControl(TrainerState& state, const json& params, const ClientGone&) {
             const float high = *mode == TC::Mode::Scale ? MAX_SCALE : MAX_FIXED_STEP;
             const json& given = params.at("value");
             value = given.is_number() ? given.get<float>() : -1.0f;
-            if (!std::isfinite(value) || value < 0.0f || value > high) {
-                throw std::runtime_error{fmt::format("{} value must be 0 to {}", name, high)};
+            if (!std::isfinite(value) || value < MIN_STEP || value > high) {
+                throw std::runtime_error{fmt::format(
+                    "{} value must be {} to {} (a step of 0 hangs the game)", name, MIN_STEP, high)};
             }
         } else {
             throw std::runtime_error{
@@ -308,17 +350,19 @@ std::span<const LiveSwitchInfo> LiveSwitches() {
     return SWITCH_INFO;
 }
 
-void AddTrainerHandlers(Handlers& handlers, System& system, std::function<bool()> stopping) {
+void AddTrainerHandlers(Handlers& handlers, System& system, std::function<bool()> stopping,
+                        CaptureStart capture) {
     RunState run{
         .powered_on = [&system] { return system.IsPoweredOn(); },
         .paused = [&system] { return system.IsPaused(); },
     };
-    AddTrainerHandlers(handlers, system, std::move(run), std::move(stopping));
+    AddTrainerHandlers(handlers, system, std::move(run), std::move(stopping), std::move(capture));
 }
 
 void AddTrainerHandlers(Handlers& handlers, System& system, RunState run,
-                        std::function<bool()> stopping) {
-    const auto state = std::make_shared<TrainerState>(system, std::move(run), std::move(stopping));
+                        std::function<bool()> stopping, CaptureStart capture) {
+    const auto state = std::make_shared<TrainerState>(system, std::move(run), std::move(stopping),
+                                                      std::move(capture));
     const auto add = [&](const char* name,
                          json (*tool)(TrainerState&, const json&, const ClientGone&)) {
         handlers.emplace(name, [state, tool](const json& params, const ClientGone& client_gone) {

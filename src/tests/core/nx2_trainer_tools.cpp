@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "common/nx2_live_switch.h"
@@ -139,6 +140,56 @@ TEST_CASE("pause, resume and step_frames drive the frontend's run control", "[nx
     }
 }
 
+TEST_CASE("step_frames with capture requests it paused and steps the last present alone",
+          "[nx2_trainer]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    FakeFrontend frontend;
+    std::vector<std::string> events;
+    Handlers handlers;
+    Core::Nx2Debug::AddTrainerHandlers(
+        handlers, system,
+        {.powered_on = [] { return true; }, .paused = [&] { return frontend.paused.load(); }},
+        [] { return false; },
+        [&](const json& params) {
+            events.push_back(fmt::format("request paused={} sampled={}", frontend.paused.load(),
+                                         params.value("sampled", false)));
+            return [&](bool cancel) -> json {
+                events.push_back(cancel ? "cancel" : fmt::format("wait paused={}", frontend.paused.load()));
+                return {{"directory", "capture-1"}};
+            };
+        });
+    const auto call = [&](const json& params) {
+        return handlers.at("step_frames")(params, [] { return false; });
+    };
+    const u64 old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        Core::Nx2Debug::SetRunControl({});
+        Core::g_nx2_present_count = old_count;
+    };
+    Core::Nx2Debug::SetRunControl([&](bool run) { frontend.paused = !run; });
+
+    const json one = call({{"frames", 1}, {"capture", true}});
+    REQUIRE(events == std::vector<std::string>{"request paused=true sampled=false", "wait paused=true"});
+    REQUIRE(one["capture"]["directory"] == "capture-1");
+    REQUIRE(one["complete"] == true);
+    REQUIRE(frontend.paused);
+
+    events.clear();
+    const u64 before = Core::g_nx2_present_count.load();
+    const json three = call({{"frames", 3}, {"capture", {{"sampled", true}}}});
+    REQUIRE(events == std::vector<std::string>{"request paused=true sampled=true", "wait paused=true"});
+    REQUIRE(three["capture_present"].get<u64>() >= before + 3);  // the last of the 3 presents
+    REQUIRE(three["advanced"].get<u64>() >= 3);
+
+    // A step that presents nothing withdraws the request: no capture of a later frame.
+    events.clear();
+    frontend.presenting = false;
+    REQUIRE_THROWS_WITH(call({{"frames", 1}, {"capture", true}, {"timeout_s", 1}}), ContainsSubstring("no capture"));
+    REQUIRE(events == std::vector<std::string>{"request paused=true sampled=false", "cancel"});
+    REQUIRE(frontend.paused);
+}
+
 TEST_CASE("time_control checks its mode and value and needs the patch", "[nx2_trainer]") {
     ScopedSystemTestContext context;
     Core::System system;
@@ -151,9 +202,11 @@ TEST_CASE("time_control checks its mode and value and needs the patch", "[nx2_tr
     };
     REQUIRE_THROWS_WITH(call({{"mode", "slow"}}), ContainsSubstring("unknown mode"));
     REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 4.5}}),
-                        ContainsSubstring("scale value must be 0 to 4"));
+                        ContainsSubstring("scale value must be 0.01 to 4"));
     REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", -0.1}}),
-                        ContainsSubstring("fixed value must be 0 to 6"));
+                        ContainsSubstring("fixed value must be 0.01 to 6"));
+    REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", 0}}), ContainsSubstring("hangs the game"));
+    REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 0.005}}), ContainsSubstring("0.01 to 4"));
     REQUIRE_THROWS_WITH(call({{"mode", "fixed"}, {"value", "1"}}),
                         ContainsSubstring("fixed value must be"));
     REQUIRE_THROWS(call({{"mode", "scale"}}));
