@@ -147,6 +147,8 @@ struct Png {
     std::vector<u8> bytes;
     u32 width;
     u32 height;
+    /// The guest present the frame shows (RendererBase::ScreenshotPresent).
+    u64 present{};
 };
 
 /// The next presented frame as a PNG, height pixels high at 16:9 (the debug server's screenshot).

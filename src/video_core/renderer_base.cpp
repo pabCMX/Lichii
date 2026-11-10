@@ -8,6 +8,7 @@
 
 #include "common/logging.h"
 #include "common/settings.h"
+#include "core/core.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "video_core/renderer_base.h"
@@ -44,7 +45,10 @@ void RendererBase::RequestScreenshot(void* data, std::function<void(bool)> callb
         LOG_ERROR(Render, "A screenshot is already requested or in progress, ignoring the request");
         return;
     }
-    auto async_callback{[callback_ = std::move(callback)](bool invert_y) {
+    // Runs on the GPU thread inside the composite that captured the frame.
+    auto async_callback{[this, callback_ = std::move(callback)](bool invert_y) {
+        renderer_settings.screenshot_present.store(
+            Core::g_nx2_composite_present.load(std::memory_order_relaxed), std::memory_order_release);
         std::thread t{callback_, invert_y};
         t.detach();
     }};

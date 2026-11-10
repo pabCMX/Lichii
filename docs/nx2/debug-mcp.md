@@ -171,7 +171,14 @@ For example: `{"method":"frame_times","params":{"seconds":5,"refresh_hz":60}}`.
 BGRA result is turned into RGB and encoded as PNG with stb, which `common` already compiles. The
 pixel buffer is owned by the completion callback, so a request that times out cannot leave the
 renderer writing into freed memory. If the Qt screenshot hotkey has a request pending, the tool
-fails instead of taking over the hotkey's request.
+fails instead of taking over the hotkey's request. The answer has `present`: the guest present
+count of the frame it captured. Each guest present queues one composite
+(`GPU::RequestComposite`, called from nx2:vi2 229 right after the count). The GPU impl takes the
+count there and stores it in `g_nx2_composite_present` before `renderer->Composite`. The
+screenshot wrapper (`RendererBase::RequestScreenshot`) runs inside that composite, copies the value
+before it starts the callback thread, and the tool reads it after the callback
+(`RendererBase::ScreenshotPresent`). A Qt hotkey screenshot that completes between the two would
+overwrite it; the debug server itself is serial. It is 0 for games that never count presents.
 
 **`log_tail`** `{after?, limit?, contains?}`. A `RingBackend` in `src/common/logging.cpp:308`
 keeps the last 20,000 formatted lines. It is an ordinary backend that `FmtLogMessageImpl` already
