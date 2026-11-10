@@ -35,6 +35,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "hid_core/hid_core.h"
+#include "hid_core/resource_manager.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_trace/recorder.h"
 #include "video_core/nx2_debug_control.h"
@@ -739,6 +740,60 @@ std::pair<HID::EmulatedController*, std::string> InputController(ToolState& stat
     throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
 }
 
+void PresentReply(u64 present);
+
+/// g_nx2_present_reply_hook's users (a frame-step replay, a recording in mode "any"): the hook and
+/// the npad update stamps are on only while one runs.
+std::mutex reply_hook_mutex;
+int reply_hook_users = 0;
+
+void UseReplyHook() {
+    std::scoped_lock lock{reply_hook_mutex};
+    if (reply_hook_users++ == 0) {
+        ::Service::HID::g_npad_update_stamps.store(true, std::memory_order_relaxed);
+        g_nx2_present_reply_hook.store(PresentReply, std::memory_order_release);
+    }
+}
+
+void DropReplyHook() {
+    std::scoped_lock lock{reply_hook_mutex};
+    if (--reply_hook_users == 0) {
+        g_nx2_present_reply_hook.store(nullptr, std::memory_order_release);
+        ::Service::HID::g_npad_update_stamps.store(false, std::memory_order_relaxed);
+    }
+}
+
+/// The frame-step replay running now, for the reply hook: the presents it covers, and the offsets
+/// from its start whose newest npad entry at the reply was written before the present was counted
+/// (the game then reads the previous step once more).
+struct ReplaySync {
+    std::mutex mutex;
+    bool active{};
+    u64 start{};
+    u64 end{};
+    std::vector<u64> stale;
+};
+
+ReplaySync& GetReplaySync() {
+    static ReplaySync sync;
+    return sync;
+}
+
+/// Reply hook part of a replay: notes present when the last npad update started before its count.
+void NoteReplayReply(u64 present) {
+    ReplaySync& sync = GetReplaySync();
+    std::scoped_lock lock{sync.mutex};
+    if (!sync.active || present < sync.start || present >= sync.end) {
+        return;
+    }
+    const u64 counted_ns =
+        g_nx2_present_times_ns[present % g_nx2_present_times_ns.size()].load(std::memory_order_acquire);
+    if (counted_ns != 0 &&
+        ::Service::HID::g_npad_update_ns.load(std::memory_order_acquire) < counted_ns) {
+        sync.stale.push_back(present - sync.start);
+    }
+}
+
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
 /// the next present on, and returns once they are done. The injector stops by itself after the
 /// last step; leaving this function by any path removes it.
@@ -797,6 +852,25 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
             fmt::format("timeout_s {} does not exceed the {} ms of input", timeout, total)};
     }
     const auto begin = std::chrono::steady_clock::now();
+    if (!timed) {
+        ReplaySync& sync = GetReplaySync();
+        std::scoped_lock lock{sync.mutex};
+        sync.active = true;
+        sync.start = start;
+        sync.end = start + total;
+        sync.stale.clear();
+        UseReplyHook();
+    }
+    SCOPE_EXIT {
+        if (!timed) {
+            ReplaySync& sync = GetReplaySync();
+            {
+                std::scoped_lock lock{sync.mutex};
+                sync.active = false;
+            }
+            DropReplyHook();
+        }
+    };
     const auto script = std::make_shared<const std::vector<InputStep>>(steps);
     if (timed) {
         controller->SetInputInjector([script, begin] {
@@ -870,6 +944,9 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         result["clock"] = "host_time";
     } else if (measure || start_present) {
         result["landed_present"] = landed;
+        ReplaySync& sync = GetReplaySync();
+        std::scoped_lock lock{sync.mutex};
+        result["stale_presents"] = sync.stale;
     }
     if (measure) {
         if (timed && (presents < 2 || presents > MAX_MEASURED_PRESENTS)) {
@@ -951,6 +1028,7 @@ struct Recorder {
     u64 blocked_sum_us{};
     u64 blocked_max_us{};
     u64 blocked_presents{};
+    bool uses_reply_hook{};
 };
 
 Recorder& GetRecorder() {
@@ -1016,9 +1094,12 @@ json ControllerStates(std::span<HID::EmulatedController* const> controllers) {
     return list;
 }
 
-void ClearRecordHooks() {
+void ClearRecordHooks(Recorder& recorder) {
     g_nx2_present_hook.store(nullptr, std::memory_order_release);
-    g_nx2_present_reply_hook.store(nullptr, std::memory_order_release);
+    if (recorder.uses_reply_hook) {
+        recorder.uses_reply_hook = false;
+        DropReplyHook();
+    }
     HID::g_npad_read_hook.store(nullptr, std::memory_order_release);
 }
 
@@ -1053,7 +1134,7 @@ void RecordPresent(u64 present) {
     const bool kept =
         recorder.any ? CloseCount(recorder) : recorder.recording->Add(present, input);
     if (!kept) {
-        ClearRecordHooks();
+        ClearRecordHooks(recorder);
         return;
     }
     if (recorder.any) {
@@ -1104,12 +1185,17 @@ void RecordNpadRead(const HID::EmulatedController& controller) {
     }
 }
 
+void PresentReply(u64 present) {
+    NoteReplayReply(present);
+    RecordPresentReply(present);
+}
+
 /// Ends any recording without a result, so neither the present path nor the npad updater reads
 /// the controllers for it any more.
 void StopRecording() {
     Recorder& recorder = GetRecorder();
     std::scoped_lock lock{recorder.mutex};
-    ClearRecordHooks();
+    ClearRecordHooks(recorder);
     recorder.recording.reset();
     recorder.at_count.reset();
     recorder.open.reset();
@@ -1149,7 +1235,8 @@ json InputRecord(ToolState& state, const json& params) {
         g_nx2_present_hook.store(RecordPresent, std::memory_order_release);
         if (recorder.any) {
             HID::g_npad_read_hook.store(RecordNpadRead, std::memory_order_release);
-            g_nx2_present_reply_hook.store(RecordPresentReply, std::memory_order_release);
+            recorder.uses_reply_hook = true;
+            UseReplyHook();
         }
         recorder.recording.emplace(g_nx2_present_count.load(std::memory_order_relaxed) + 1,
                                    MAX_INPUT_FRAMES, MAX_INPUT_STEPS);
@@ -1191,7 +1278,7 @@ json InputRecord(ToolState& state, const json& params) {
             if (!recorder.recording) {
                 throw std::runtime_error{"not recording"};
             }
-            ClearRecordHooks();
+            ClearRecordHooks(recorder);
             // The count running now ends here: its step holds what the game got so far.
             static_cast<void>(CloseCount(recorder));
             any = recorder.any;

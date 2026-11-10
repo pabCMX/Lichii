@@ -421,6 +421,19 @@ while the injector was being installed, so `landed_present == first_present` whe
 succeed. A harness proves a landing error of 0 by checking `landed_present == start_present`. The
 plain reply stays as origin's.
 
+The same calls answer `stale_presents`: the offsets from `first_present` whose newest npad entry
+at the present's reply was written before the present was counted. The game reads the newest
+entry of the npad LIFO, not the injector. The npad updater writes that entry on its own 1 ms
+core-timing event, which in multicore runs on the timer thread by host time
+(`core_timing.cpp`), not in step with the game. The game resumes and reads after the reply of
+present c (`g_nx2_present_reply_hook`). When the time from count to reply is shorter than the
+wait for the next update, the newest entry still holds step c - 1, and the game gets the old
+input for one more frame. With the stamps on (only while a frame-step call or a recording in mode
+`"any"` runs), `ResourceManager::UpdateNpad` stores the host time of each update's start
+(`HID::g_npad_update_ns`). The reply hook compares it with the present's count time in
+`g_nx2_present_times_ns`. An update that began just before the count but read after it is
+counted as stale too, so the list is an upper bound.
+
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
 (`SCOPE_EXIT`): when the steps are done; on timeout (default `frames / 20 + 10` or

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/service.h"
 
@@ -52,6 +54,11 @@ class NpadN64VibrationDevice;
 class NpadGcVibrationDevice;
 class NpadVibrationDevice;
 struct HandheldConfig;
+
+/// While set (the debug server's input calls and input_record), each npad update stores the host
+/// steady-clock time of its start in g_npad_update_ns.
+extern std::atomic<bool> g_npad_update_stamps;
+extern std::atomic<u64> g_npad_update_ns;
 
 class ResourceManager {
 
