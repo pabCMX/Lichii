@@ -187,7 +187,8 @@ at the next present), so a client reads `features` first. An exe without the met
 `input_record`, `record_mode` (`mode` any or sample), `start_present`, `landed_present`,
 `screenshot_present`, `luma_watch` and `npad_sync`, and with the trainer kit `pause`,
 `step_frames`, `time_control`, `time_trace` (`time_control {trace}`) and `switches`
-(trainer-kit.md). `kit` is 2 (since `npad_sync`) and rises when the contract of a listed feature
+(trainer-kit.md). With the trainer kit and an Ocarina boot with `EDEN_NX2_OOT_TIME_CONTROL=1`, the
+reply also has `time_control_block`, the guest address of the time control block. `kit` is 2 (since `npad_sync`) and rises when the contract of a listed feature
 changes. `status` stays as origin's.
 
 **`luma_watch`** `{presents?, cancel?, wait_s?}` finds a load's fade-in exactly, after the fact.
