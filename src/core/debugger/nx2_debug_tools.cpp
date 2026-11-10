@@ -2037,6 +2037,7 @@ Service::~Service() {
     // After the server, whose one thread runs every handler, so no input_record start follows.
     server.reset();
     StopRecording();
+    StopStepTrace();
     GetWatchdog().Stop();
 }
 

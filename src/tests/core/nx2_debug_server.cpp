@@ -1299,5 +1299,7 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
     REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
-            json{{"features", {"input_ms", "measure"}}, {"kit", 2}, {"kit_hooks", false}});
+            json{{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches"}},
+                 {"kit", 2},
+                 {"kit_hooks", false}});
 }
