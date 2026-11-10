@@ -1041,3 +1041,13 @@ TEST_CASE("Luma watch keeps one sample per composite until it is done", "[core][
     REQUIRE_THROWS(call({{"presents", 2.5}}));
     REQUIRE_THROWS(call({{"frames", 2}}));
 }
+
+TEST_CASE("Debug server features name what this build supports", "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
+            json{{"features",
+                  {"input_ms", "measure", "input_record", "record_mode", "start_present",
+                   "landed_present", "screenshot_present", "luma_watch"}},
+                 {"kit", 1}});
+}

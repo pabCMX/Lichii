@@ -1202,6 +1202,15 @@ json LumaWatch(ToolState& state, const json& params, const ClientGone& client_go
     return {{"samples", std::move(list)}, {"remaining", remaining}, {"done", remaining == 0}};
 }
 
+/// What this build's debug server supports beyond origin, so a client can tell an older exe,
+/// which ignores unknown parameters, apart. Raise kit when the kit's contract changes.
+json Features(ToolState&, const json&) {
+    return {{"features",
+             {"input_ms", "measure", "input_record", "record_mode", "start_present",
+              "landed_present", "screenshot_present", "luma_watch"}},
+            {"kit", 1}};
+}
+
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     const auto handler = [&state](json (*tool)(ToolState&, const json&)) -> Handler {
         return [state, tool](const json& params, const ClientGone&) { return tool(*state, params); };
@@ -1213,6 +1222,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     };
     return {
         {"status", handler(Status)},
+        {"features", handler(Features)},
         {"frame_times", handler(FrameTimes)},
         {"screenshot", handler(Screenshot)},
         {"log_tail", handler(LogTail)},
