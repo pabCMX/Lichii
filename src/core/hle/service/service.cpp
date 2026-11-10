@@ -18,6 +18,7 @@
 #include <fmt/ranges.h>
 #include "common/assert.h"
 #include "common/logging.h"
+#include "common/nx2_live_switch.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/hle/ipc.h"
@@ -191,7 +192,7 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
 
     LOG_TRACE(Service, "{}", MakeFunctionString(info->name, GetServiceName(), ctx.CommandBuffer()));
     // EDEN_NX2_IPC_TRACE=1 logs every dispatched command and the result word it returned.
-    static const bool ipc_trace = std::getenv("EDEN_NX2_IPC_TRACE") != nullptr;
+    const bool ipc_trace = Common::Nx2Live::g_ipc_trace();
     if (ipc_trace) {
         LOG_INFO(Service, "ipc {}::{} ({})", service_name, ctx.GetCommand(), info->name);
     }
@@ -218,7 +219,7 @@ void ServiceFrameworkBase::InvokeRequestTipc(HLERequestContext& ctx) {
         return ReportUnimplementedFunction(ctx, info);
 
     LOG_TRACE(Service, "{}", MakeFunctionString(info->name, GetServiceName(), ctx.CommandBuffer()));
-    static const bool ipc_trace = std::getenv("EDEN_NX2_IPC_TRACE") != nullptr;
+    const bool ipc_trace = Common::Nx2Live::g_ipc_trace();
     if (ipc_trace) {
         const auto* w = ctx.CommandBuffer();
         LOG_INFO(Service, "tipc {}::{} ({}) [2]={:#x} [3]={:#x} [4]={:#x}", service_name,
@@ -231,8 +232,7 @@ namespace {
 // EDEN_NX2_IPC_SUMMARY: every 5 s, log how often each service command ran and with which result
 // since the last summary (finds a game polling something that never becomes ready).
 void CountRequest(const std::string& service, u32 command, u32 type, u32 result) {
-    static const bool enabled = std::getenv("EDEN_NX2_IPC_SUMMARY") != nullptr;
-    if (!enabled) {
+    if (!Common::Nx2Live::g_ipc_summary()) {
         return;
     }
     static std::mutex mutex;

@@ -52,6 +52,7 @@ add_library(
     jit_symbols.h
     nx2_kit_stall.cpp
     nx2_kit_stall.h
+    nx2_live_switch.h
     nx2_sampler.cpp
     nx2_sampler.h
     dynamic_library.cpp

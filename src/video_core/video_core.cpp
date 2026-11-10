@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "common/logging.h"
+#include "common/nx2_live_switch.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/frontend/emu_window.h"
@@ -58,6 +59,7 @@ namespace VideoCore {
 void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_window, Core::System& system) {
     Settings::UpdateRescalingInfo();
     VideoCommon::Nx2Profile::ReadSwitch();
+    Common::Nx2Live::ReadEnv();
     VideoCommon::StutterTrace::StartSession();
     Tegra::Nx2CmdPageDiag::ReadSwitch();
     VideoCommon::Nx2DownloadTrace::ReadSwitch();

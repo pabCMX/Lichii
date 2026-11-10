@@ -2,15 +2,13 @@
 
 #pragma once
 
-#include <cstdlib>
-
 #include "common/common_types.h"
+#include "common/nx2_live_switch.h"
 
 namespace VideoCommon::RenderTrace {
 
 inline bool Enabled() {
-    static const bool enabled = std::getenv("EDEN_NX2_RENDER_TRACE") != nullptr;
-    return enabled;
+    return Common::Nx2Live::g_render_trace();
 }
 
 inline bool SampleFrame(u64 frame) {
