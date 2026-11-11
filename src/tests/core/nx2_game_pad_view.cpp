@@ -84,6 +84,7 @@ TEST_CASE("The trainer overlay's REC count is the recorder's own", "[core][nx2_d
         if (Core::Nx2Debug::ReadGamePad(system).recording) {
             static_cast<void>(record("stop"));
         }
+        static_cast<void>(Core::Nx2Debug::CallTool(system, "record_anchor", {{"off", true}}));
         player1.SetInputInjector({});
         player1.Disconnect();
         Core::g_nx2_present_count = old_count;
@@ -125,6 +126,18 @@ TEST_CASE("The trainer overlay's REC count is the recorder's own", "[core][nx2_d
     const u64 full_at = view.recorded;
     present();
     REQUIRE(Core::Nx2Debug::ReadGamePad(system).recorded == full_at);
+
+    // With the pre-roll ring armed, counts still open after truncation; the mark keeps what stop
+    // returns.
+    static_cast<void>(record("stop"));
+    static_cast<void>(Core::Nx2Debug::CallTool(system, "record_anchor", nlohmann::json::object()));
+    static_cast<void>(record("start"));
+    for (int i = 0; i < 6100; ++i) {
+        present();
+    }
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.record_full);
+    REQUIRE(view.recorded == record("stop")["presents"].get<u64>());
 }
 
 TEST_CASE("The trainer overlay shows WAIT before a scheduled clip and REPLAY only during it",
@@ -273,7 +286,7 @@ TEST_CASE("The trainer overlay reads the pre-roll ring's kept and lost presents"
     }
     auto view = Core::Nx2Debug::ReadGamePad(system);
     REQUIRE(view.pre_roll_armed);
-    REQUIRE_FALSE(view.recording); // the ring alone is not a recording
+    REQUIRE_FALSE(view.recording);    // the ring alone is not a recording
     REQUIRE(view.pre_roll_kept == 2); // the newest present stays open until the next one
     REQUIRE(view.pre_roll_kept ==
             Core::Nx2Debug::CallTool(system, "input_record",
