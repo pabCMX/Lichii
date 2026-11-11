@@ -6,6 +6,7 @@
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/debugger/nx2_debug_tools.h"
+#include "hid_core/hid_core.h"
 #include "tests/core/system_test_context.h"
 
 TEST_CASE("The trainer overlay reads what the game is given from both controllers",
