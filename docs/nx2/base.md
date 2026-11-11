@@ -7,11 +7,12 @@ then always Base against Base plus one change. Names and flow are in `personal-o
 
 ## This Base
 
-The Base of 2026-11-11 is `base/Base-e63d0a04df-20261111-0635`: origin/nx2 `e63d0a04df` (#1334)
-plus the kit, and from this Base on also the trainer kit (the commits after this one). It was
-prepared on origin/nx2 `17baed716d` and moved onto `e63d0a04df` at the 06:35 US Eastern cut with
-no conflict. The move gives the kit commits new hashes, so the table names them by their commit in
-the Base of 2026-11-10 (`base/Base-bcb37c49f7-20261110-0635`).
+The current Base is `base/Base-d5bb40ad4c-20261111-1440`: origin/nx2 `d5bb40ad4c` (#1359) plus
+the kit and the trainer kit. It is the second Base of 2026-11-11, cut early on the owner's order
+to get upstream's new frame stats overlay (#1345). The 42 commits of
+`base/Base-e63d0a04df-20261111-0635` moved onto `d5bb40ad4c` with no conflict. The move gives the
+kit commits new hashes, so the table names them by their commit in the Base of 2026-11-10
+(`base/Base-bcb37c49f7-20261110-0635`).
 
 | Commit in the old Base | What it adds |
 | --- | --- |
@@ -31,7 +32,25 @@ Two kit commits needed a conflict fix on `17baed716d`, both in `#include` lines 
 - `fef13892c0` (screenshot present), `src/video_core/renderer_base.cpp`: #1249 added
   `common/settings.h`. Both `common/settings.h` and the kit's `core/core.h` stay.
 
-Upstream since the old Base (`bcb37c49f7`), 41 commits. These change what a test run sees:
+Upstream since `e63d0a04df` (the first Base of 2026-11-11), 14 commits. These change what a test
+run sees:
+
+- #1345: the frame stats overlay is new: a big FPS number, CPU and GPU percent, and a frame-time
+  graph of the last 5 s. `PerfStats` keeps a frame-time history for it, and the Vulkan scheduler
+  measures GPU busy time. `performance_overlay.ui` is gone.
+- #1363 and #1347: shader lowering changes (3D SURED, bindless AOFFI gather, geometry ALD,
+  unsigned clamps folded to IMNMX.U32). They can change lowered Ocarina shaders and cache keys.
+  Warm the shader cache again on this Base before a timed A/B.
+- #1337: an evicted graphics pipeline is built again from its kept SPIR-V, not translated again.
+- #1331 (one cache line per exclusive reservation), #1332 (GpuSplit front and back fields in
+  separate cache lines), #1325 (images over the texel limit that fit in 1 GiB get backing): speed
+  and memory changes with no setting.
+- #1349: the thread sampler stops a stack walk at generated code. Before, a sample of a CPU core
+  thread could crash the emulator.
+- #1359: LAN play, off by default (Configure > Network). #1365 (dark theme, dialogs) and #1371
+  (game list rows): UI only. #1232, #552, #851: no known effect on an Ocarina test run.
+
+Upstream from `bcb37c49f7` (the Base of 2026-11-10) to `e63d0a04df`, 41 commits:
 
 - #1253, own data folder: see "Data folder" below.
 - #1264: Lichii never asks for the recommended settings on its own. See "What the harness uses".
@@ -205,7 +224,7 @@ Linux check, from a checkout that has `tools/nx2/devbox` (for example `~/dev/lic
 
 ```sh
 flock ~/dev/lichii-builds/.build.lock env JOBS=4 \
-  tools/nx2/devbox/linux-build.sh base/Base-e63d0a04df-20261111-0635 base-e63d0a04df
+  tools/nx2/devbox/linux-build.sh base/Base-d5bb40ad4c-20261111-1440 base-d5bb40ad4c
 ```
 
 Windows packages use the main-PC recipe in `docs/nx2/devbox-build.md` on `personal/oot-lab`, with
