@@ -649,8 +649,11 @@ then `steps`. Step 0 of `pre_roll` is at `start_present`, so `steps` start `pre_
 presents later, the same offset from the anchor as in the live run when `start_present` is
 `anchor_present + 1`. The reply adds `pre_roll_frames` and `clip_present` (the present of the
 clip's step 0). `pre_roll` takes frame steps only, and `pre_roll` and `steps` together keep the
-limits of one call (6000 steps, 36000 frames). A client can also put the pre-roll steps in front
-of the clip itself: the game gets the same input.
+limits of one call (6000 steps, 36000 frames). With `measure: true` the measurement covers the
+clip only, so its 3840-present limit counts the clip's frames. Use this parameter, not the
+pre-roll steps put in front of the clip: a client that splits a long clip into measured calls has
+a gap of at least one present without input between calls, and a gap inside the pre-roll would
+move the clip's start.
 
 ### Phase 2: control and input (about 4 to 5 days)
 

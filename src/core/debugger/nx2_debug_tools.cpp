@@ -990,9 +990,10 @@ bool NoteReplayReply(u64 present) {
 
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
 /// the next present on, and returns once they are done. The injector stops by itself after the
-/// last step; leaving this function by any path removes it.
+/// last step; leaving this function by any path removes it. The first clip_offset frames are a
+/// pre-roll: measure leaves them out.
 json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json& params,
-              const ClientGone& client_gone) {
+              const ClientGone& client_gone, u64 clip_offset = 0) {
     // Timed steps follow host time, for games that advance by elapsed time rather than per present.
     const bool timed = steps.front().ms != 0;
     u64 total = 0;
@@ -1008,7 +1009,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
                                              timed ? MAX_INPUT_MS : MAX_INPUT_FRAMES)};
     }
     const bool measure = params.value("measure", false);
-    if (measure && !timed && total > MAX_MEASURED_PRESENTS) {
+    if (measure && !timed && total - clip_offset > MAX_MEASURED_PRESENTS) {
         throw std::runtime_error{
             fmt::format("measured input is limited to {} presents", MAX_MEASURED_PRESENTS)};
     }
@@ -1169,8 +1170,9 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
                           {"complete", false}, {"covered_presents", 0}});
             result["measurement"] = std::move(empty);
         } else {
-            result["measurement"] = ReadInputFrameTimes(start, presents, ns(begin),
-                                                       ns(std::chrono::steady_clock::now()));
+            result["measurement"] =
+                ReadInputFrameTimes(start + clip_offset, presents - clip_offset, ns(begin),
+                                    ns(std::chrono::steady_clock::now()));
         }
         json& measurement = result["measurement"];
         if (timed && measurement["complete"].get<bool>()) {
@@ -1198,8 +1200,9 @@ json Input(ToolState& state, const json& params, const ClientGone& client_gone) 
 }
 
 /// {steps, pre_roll?, ...}: pre_roll (an input_record stop reply's pre_roll steps) plays first,
-/// so the clip starts pre_roll's frames after step 0's present, as in the live run. Both count
-/// against the limits of one call.
+/// so the clip starts pre_roll's frames after step 0's present, as in the live run, with no gap
+/// between them. Both count against the step and frame limits of one call; measure covers the
+/// clip only.
 json InputSequence(ToolState& state, const json& params, const ClientGone& client_gone) {
     const json& list = params.at("steps");
     if (!list.is_array() || list.empty() || list.size() > MAX_INPUT_STEPS) {
@@ -1229,7 +1232,7 @@ json InputSequence(ToolState& state, const json& params, const ClientGone& clien
         pre_roll_frames += step.frames;
     }
     parse(list, "step");
-    json result = RunInput(state, steps, params, client_gone);
+    json result = RunInput(state, steps, params, client_gone, pre_roll_frames);
     if (!pre_roll.empty()) {
         result["pre_roll_frames"] = pre_roll_frames;
         result["clip_present"] = result["first_present"].get<u64>() + pre_roll_frames;
