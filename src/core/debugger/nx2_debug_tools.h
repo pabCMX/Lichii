@@ -126,10 +126,12 @@ struct ScanList {
 void RefineScan(Memory::Memory& memory, ScanList& list, ScanTest test);
 
 /// capture_frames: whether the screenshot of target may be requested now. g_nx2_composite_present
-/// is set just before each composite, whose screenshot check comes after it, so a request made
-/// once it reached target is taken by that composite or a later one: a shot is never early.
+/// is set just before each composite, whose screenshot check comes after it. The request names
+/// target as its first present, so the renderer leaves it for the target's composite. It goes in
+/// once the composite before the target has begun, so the wait loop's 1 ms poll is not late for
+/// the target's own check.
 [[nodiscard]] constexpr bool CaptureDue(u64 composite_present, u64 target_present) {
-    return composite_present >= target_present;
+    return composite_present + 1 >= target_present;
 }
 
 /// The error of a capture entry with no file: requested (its screenshot was asked for) and

@@ -204,7 +204,7 @@ void RendererOpenGL::RenderToBuffer(std::span<const Tegra::FramebufferConfig> fr
 }
 
 void RendererOpenGL::RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers) {
-    if (!renderer_settings.screenshot_requested) {
+    if (!ScreenshotDue()) {
         return;
     }
 

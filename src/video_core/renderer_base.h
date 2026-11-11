@@ -73,6 +73,9 @@ struct RendererSettings {
     Service::Nvnflinger::LayerStackId screenshot_layer_stack{Service::Nvnflinger::LayerStackId::Default};
     /// The guest present of the last captured screenshot (g_nx2_composite_present).
     std::atomic<u64> screenshot_present{};
+    /// A composite of an earlier present (g_nx2_composite_present) leaves the request pending.
+    /// Written before screenshot_requested is set.
+    u64 screenshot_first_present{};
 };
 
 class RendererBase {
@@ -157,17 +160,22 @@ public:
     /// Returns true if a screenshot is being processed
     bool IsScreenshotPending() const;
 
+    /// For the renderers' composite: a screenshot is requested and this composite may take it.
+    [[nodiscard]] bool ScreenshotDue() const;
+
     /// The guest present count of the frame the last screenshot captured. Set before its callback
     /// runs, so the callback and whoever it wakes can read it.
     [[nodiscard]] u64 ScreenshotPresent() const {
         return renderer_settings.screenshot_present.load(std::memory_order_acquire);
     }
 
-    /// Request a screenshot of the next frame.
+    /// Request a screenshot of the next frame, or with first_present of the first composite of
+    /// that guest present or a later one (input_sequence capture_frames).
     void RequestScreenshot(void* data, std::function<void(bool)> callback,
                            const Layout::FramebufferLayout& layout,
                            Service::Nvnflinger::LayerStackId layer_stack =
-                               Service::Nvnflinger::LayerStackId::Default);
+                               Service::Nvnflinger::LayerStackId::Default,
+                           u64 first_present = 0);
 
 protected:
     Core::Frontend::EmuWindow& render_window; ///< Reference to the render window handle.
