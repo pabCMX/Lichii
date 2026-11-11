@@ -1265,10 +1265,10 @@ std::vector<u64> ClipFrames(const json& list, u64 clip_frames, size_t max, std::
 }
 
 /// input_sequence capture_frames: the input wait loop requests a 1280x720 screenshot of each
-/// named clip frame, so nothing runs on the present path. A request goes in once the composite
-/// of the present before the target has begun; a shot can still land later (adjacent frames, or
-/// a composite that had not reached its check), so each entry names the present it shows. The
-/// renderer's callback thread encodes and writes the file.
+/// named clip frame, so nothing runs on the present path. A request goes in once the target's
+/// composite has begun (CaptureDue): the shot is that composite or a later one, never an earlier
+/// one, and each entry names the present it shows. The renderer's callback thread encodes and
+/// writes the file.
 class ClipCaptures {
 public:
     ClipCaptures(ToolState& state, std::vector<u64> frames, u64 clip_present)
@@ -1291,7 +1291,7 @@ public:
             pending.reset();
         }
         if (next == shots.size() || renderer.IsScreenshotPending() ||
-            g_nx2_composite_present.load(std::memory_order_acquire) + 1 < shots[next].target) {
+            !CaptureDue(g_nx2_composite_present.load(std::memory_order_acquire), shots[next].target)) {
             return;
         }
         Shot& shot = shots[next];

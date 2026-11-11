@@ -1667,6 +1667,14 @@ TEST_CASE("Input sequences play a pre-roll before the clip", "[core][nx2_debug_s
     REQUIRE(inputs[offset + 6].buttons == Core::HID::NpadButton::A);
 }
 
+TEST_CASE("A clip capture is requested only once its target's composite has begun",
+          "[core][nx2_debug_server]") {
+    // The composite before the target may not have reached its screenshot check yet.
+    STATIC_REQUIRE_FALSE(Core::Nx2Debug::CaptureDue(6913, 6914));
+    STATIC_REQUIRE(Core::Nx2Debug::CaptureDue(6914, 6914));
+    STATIC_REQUIRE(Core::Nx2Debug::CaptureDue(6915, 6914));
+}
+
 TEST_CASE("Clip captures name distinct clip frames, at most 32", "[core][nx2_debug_server]") {
     ScopedSystemTestContext context;
     Core::System system;
