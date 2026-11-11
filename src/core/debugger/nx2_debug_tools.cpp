@@ -2366,9 +2366,11 @@ GamePadView ReadGamePad(System& system) {
         // Not recording_active, which the pre-roll ring sets too.
         view.recording = recorder.recording.has_value();
         if (recorder.recording) {
-            // As status counts them: the open count only once it is in the recording.
+            // As stop returns them: the open count only once it is in the recording, and not
+            // after truncation, when the pre-roll ring still opens counts.
             const bool open_in_recording =
-                recorder.open && recorder.open->present >= recorder.recording->StartPresent();
+                recorder.open && recorder.open->present >= recorder.recording->StartPresent() &&
+                !recorder.recording->Truncated();
             view.recorded = recorder.recording->Presents() + (open_in_recording ? 1 : 0);
             view.record_full = recorder.recording->Truncated() ||
                                (recorder.at_count && recorder.at_count->Truncated());
