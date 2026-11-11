@@ -274,7 +274,7 @@ TEST_CASE("The trainer overlay reads the pre-roll ring's kept and lost presents"
     auto view = Core::Nx2Debug::ReadGamePad(system);
     REQUIRE(view.pre_roll_armed);
     REQUIRE_FALSE(view.recording); // the ring alone is not a recording
-    REQUIRE(view.pre_roll_kept == 3);
+    REQUIRE(view.pre_roll_kept == 2); // the newest present stays open until the next one
     REQUIRE(view.pre_roll_kept ==
             Core::Nx2Debug::CallTool(system, "input_record",
                                      {{"action", "status"}})["pre_roll"]["presents"]
