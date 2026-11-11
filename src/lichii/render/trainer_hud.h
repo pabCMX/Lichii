@@ -30,6 +30,7 @@ struct InputFrame {
     u64 recorded{}; ///< presents recorded so far
     bool record_full{};
     bool replaying{};
+    u64 replay_wait{}; ///< presents until a scheduled clip starts
 };
 
 /// The input panel's size in layout units.
