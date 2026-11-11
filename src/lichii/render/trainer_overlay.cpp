@@ -39,7 +39,8 @@ bool SameInput(const TrainerHud::InputFrame& a, const TrainerHud::InputFrame& b)
     return a.buttons == b.buttons && a.left_x == b.left_x && a.left_y == b.left_y &&
            a.right_x == b.right_x && a.right_y == b.right_y && a.recording == b.recording &&
            a.recorded == b.recorded && a.record_full == b.record_full &&
-           a.replaying == b.replaying && a.replay_wait == b.replay_wait;
+           a.replaying == b.replaying && a.replay_wait == b.replay_wait &&
+           a.pre_roll_left == b.pre_roll_left;
 }
 
 } // Anonymous namespace
@@ -163,6 +164,7 @@ void TrainerOverlay::ReadInput() {
     frame.record_full = view.record_full;
     frame.replaying = view.replaying;
     frame.replay_wait = view.replay_wait;
+    frame.pre_roll_left = view.pre_roll_left;
 }
 
 void TrainerOverlay::paintEvent(QPaintEvent*) {

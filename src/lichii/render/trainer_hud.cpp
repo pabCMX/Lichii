@@ -24,6 +24,7 @@ const QColor TRAIL{80, 220, 255};
 const QColor REC{229, 57, 53};
 const QColor REPLAY{30, 136, 229};
 const QColor WAIT{120, 120, 120};
+const QColor PRE{21, 101, 192}; ///< a darker REPLAY: replayed input before the clip
 
 constexpr double STICK_RADIUS = 26.0;
 
@@ -124,7 +125,7 @@ void StickText(QPainter& painter, QPointF top_left, s32 x, s32 y) {
                      QString::number(reading.magnitude, 'f', 2));
 }
 
-/// The REC, REPLAY and WAIT marks.
+/// The REC, REPLAY, PRE and WAIT marks.
 void StateMarks(QPainter& painter, const InputFrame& frame) {
     painter.setFont(Font(12, true));
     double x = 8.0;
@@ -146,6 +147,9 @@ void StateMarks(QPainter& painter, const InputFrame& frame) {
     }
     if (frame.replaying) {
         mark(QStringLiteral("▶ REPLAY"), REPLAY);
+    }
+    if (frame.pre_roll_left != 0) {
+        mark(QStringLiteral("▶ PRE %1").arg(frame.pre_roll_left), PRE);
     }
     if (frame.replay_wait != 0) {
         mark(QStringLiteral("WAIT %1").arg(frame.replay_wait), WAIT);
