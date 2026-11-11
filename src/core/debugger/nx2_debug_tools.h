@@ -208,6 +208,9 @@ public:
     /// expected one is ignored; skipped presents get this input too. False once truncated.
     bool Add(u64 present, const HID::InjectedInput& input);
 
+    /// Whether Add(present, input) would record that present whole, without changing anything.
+    [[nodiscard]] bool Takes(u64 present, const HID::InjectedInput& input) const;
+
     [[nodiscard]] const std::vector<InputStep>& Steps() const {
         return steps;
     }

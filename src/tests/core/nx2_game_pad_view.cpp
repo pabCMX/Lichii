@@ -116,8 +116,17 @@ TEST_CASE("The trainer overlay's REC count is the recorder's own", "[core][nx2_d
     REQUIRE(view.recorded == 1);
     REQUIRE_FALSE(view.record_full);
 
+    // At its step limit, before any Add failed: the open present cannot fit, so neither the mark
+    // nor status counts it (S1: they gave 6001 and stop 6000).
+    for (int i = 1; i < 6001; ++i) {
+        present();
+    }
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.recorded == 6000);
+    REQUIRE(record("status")["presents"] == 6000);
+
     // Past its step limit the recorder stops counting, and so does the mark.
-    for (int i = 0; i < 6100; ++i) {
+    for (int i = 0; i < 100; ++i) {
         present();
     }
     view = Core::Nx2Debug::ReadGamePad(system);
