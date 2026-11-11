@@ -386,7 +386,14 @@ list, as in a cheat engine:
   `scanned_bytes` (the mapped bytes read).
 - The list keeps at most 2,000,000 hits (16 bytes each, 32 MB). A first scan that finds more
   stops there with `truncated: true`: the addresses after the last hit were not looked at, so
-  narrow the range or the region and scan again. A first scan stops after `budget_ms` (default
+  narrow the range or the region and scan again. A first scan always has a filter: `value`, or
+  `min` and `max`. A range over a whole type (`u16` from 0 to 65535) matches every aligned value
+  and hits the cap at once; give the narrowest range you can, and use `regions` to cut the bytes.
+- A binary angle (`u16` or `s16`, a full turn in 65536 steps) wraps: a facing near 0 is near
+  65535 too, and one turn takes it from 65535 to 0. A `range` around 0 then needs two scans
+  (`0` to `k` and `65535 - k` to `65535`), and `increased` or `decreased` give the wrong answer
+  for the refine in which the value passes the wrap. Turn the other way, or refine with `changed`
+  for that step. `s16` is not a scan type: scan it as `u16`, where -1 is 65535. A first scan stops after `budget_ms` (default
   30000, at most 60000) with `complete: false`.
 - Every reply has `type`, `count`, `truncated`, `complete` and `max_hits`; a refine also `before`.
 - The list is one per process, kept between calls and freed when the game stops. The scan reads
