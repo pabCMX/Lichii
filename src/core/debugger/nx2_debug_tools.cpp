@@ -1313,17 +1313,16 @@ public:
         json list = json::array();
         for (Shot& shot : shots) {
             json entry = {{"frame", shot.frame}, {"target_present", shot.target}};
-            const bool written =
-                shot.written.valid() && shot.present &&
-                shot.written.wait_until(deadline) == std::future_status::ready;
-            const std::string path = written ? shot.written.get() : "";
+            // Before get(), which leaves the future invalid.
+            const bool requested = shot.written.valid();
+            const bool finished = requested && shot.present &&
+                                  shot.written.wait_until(deadline) == std::future_status::ready;
+            const std::string path = finished ? shot.written.get() : "";
             if (!path.empty()) {
                 entry["present"] = *shot.present;
                 entry["path"] = path;
             } else {
-                entry["error"] = !shot.written.valid() ? "not requested: no composite reached it in time"
-                                 : written             ? "the file could not be written"
-                                                       : "the screenshot did not finish in time";
+                entry["error"] = CaptureError(requested, finished);
             }
             list.push_back(std::move(entry));
         }
@@ -2818,6 +2817,12 @@ bool SameInput(const HID::InjectedInput& a, const HID::InjectedInput& b) {
 }
 
 } // Anonymous namespace
+
+std::string_view CaptureError(bool requested, bool finished) {
+    return !requested ? "not requested: no composite reached it in time"
+           : finished ? "the file could not be written"
+                      : "the screenshot did not finish in time";
+}
 
 bool IsNeutral(const HID::InjectedInput& input) {
     const auto centred = [](const std::optional<HID::AnalogStickState>& stick) {

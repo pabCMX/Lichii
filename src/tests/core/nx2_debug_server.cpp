@@ -1696,6 +1696,13 @@ TEST_CASE("A clip capture is requested only once its target's composite has begu
     STATIC_REQUIRE(Core::Nx2Debug::CaptureDue(6915, 6914));
 }
 
+TEST_CASE("A capture without a file says why", "[core][nx2_debug_server]") {
+    using Core::Nx2Debug::CaptureError;
+    REQUIRE(CaptureError(false, false).starts_with("not requested"));
+    REQUIRE(CaptureError(true, true) == "the file could not be written");
+    REQUIRE(CaptureError(true, false) == "the screenshot did not finish in time");
+}
+
 TEST_CASE("Clip captures name distinct clip frames, at most 32", "[core][nx2_debug_server]") {
     ScopedSystemTestContext context;
     Core::System system;

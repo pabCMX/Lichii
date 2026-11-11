@@ -132,6 +132,10 @@ void RefineScan(Memory::Memory& memory, ScanList& list, ScanTest test);
     return composite_present >= target_present;
 }
 
+/// The error of a capture entry with no file: requested (its screenshot was asked for) and
+/// finished (the shot was taken and the write ended, but gave no file).
+[[nodiscard]] std::string_view CaptureError(bool requested, bool finished);
+
 /// input_sequence watch: the values of some addresses at each present of [start, end), read by
 /// the present reply hook.
 class ValueWatch {
