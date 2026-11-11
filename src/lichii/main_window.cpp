@@ -419,6 +419,13 @@ MainWindow::MainWindow(bool has_broken_vulkan)
             },
             Qt::QueuedConnection);
     });
+    // The debug server's notify, queued for the same reason.
+    Core::Nx2Debug::SetStatusNotify([this](std::string text, int ms) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, text = QString::fromStdString(text), ms] { ShowStatusMessage(text, ms); },
+            Qt::QueuedConnection);
+    });
 
     Common::FS::CreateEdenPaths();
     this->config = std::make_unique<QtConfig>();
@@ -619,6 +626,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 
 MainWindow::~MainWindow() {
     Core::Nx2Debug::SetRunControl({});
+    Core::Nx2Debug::SetStatusNotify({});
     if (nup_cancel) {
         nup_cancel->store(true);
     }

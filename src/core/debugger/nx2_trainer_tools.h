@@ -9,6 +9,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <string>
 #include <utility>
 #include <string_view>
 #include <vector>
@@ -20,7 +21,7 @@ class System;
 }
 
 /// Trainer methods of the debug server (docs/nx2/trainer-kit.md): pause, resume, step_frames,
-/// time_control and switches.
+/// time_control, switches and notify.
 namespace Core::Nx2Debug {
 
 /// Pauses (run false) or resumes (run true) emulation the way the frontend's own pause button
@@ -31,6 +32,13 @@ using RunControl = std::function<void(bool run)>;
 /// The frontend registers its run control at startup and clears it ({}) before it is destroyed.
 /// Thread-safe: a clear waits for a call in progress.
 void SetRunControl(RunControl control);
+
+/// Shows text in the frontend's status bar for ms milliseconds (the notify method). It must not
+/// wait on the GUI thread, for the reason RunControl gives.
+using StatusNotify = std::function<void(std::string text, int ms)>;
+
+/// The frontend registers its status bar at startup and clears it ({}) before it is destroyed.
+void SetStatusNotify(StatusNotify notify);
 
 /// One live switch: its method name, its environment variable and its class in the
 /// docs/nx2/debug-mcp.md table.

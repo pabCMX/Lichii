@@ -46,6 +46,11 @@ constexpr u64 MAX_TRACE_PRESENTS = 36000;
 
 std::mutex g_control_mutex;
 RunControl g_control;
+std::mutex g_notify_mutex;
+StatusNotify g_notify;
+/// notify's limits: a status bar line, shown for at most 10 minutes.
+constexpr size_t MAX_NOTIFY_TEXT = 500;
+constexpr int MAX_NOTIFY_MS = 600'000;
 
 struct LiveSwitch {
     LiveSwitchInfo info;
@@ -515,6 +520,39 @@ json Switches(TrainerState&, const json& params, const ClientGone&) {
     return {{"switches", std::move(list)}};
 }
 
+// {text, ms?}: shows text in the status bar for ms (default 5000). Answers at once; the frontend
+// shows it on its own thread.
+json Notify(TrainerState&, const json& params, const ClientGone&) {
+    for (const auto& [key, value] : params.items()) {
+        if (key != "text" && key != "ms") {
+            throw std::runtime_error{fmt::format("unknown key \"{}\": want text or ms", key)};
+        }
+    }
+    if (!params.contains("text") || !params.at("text").is_string()) {
+        throw std::runtime_error{"text must be a string"};
+    }
+    std::string text = params.at("text").get<std::string>();
+    if (text.size() > MAX_NOTIFY_TEXT) {
+        throw std::runtime_error{fmt::format("text has {} bytes; at most {}", text.size(),
+                                             MAX_NOTIFY_TEXT)};
+    }
+    // One status bar line.
+    std::ranges::replace(text, '\n', ' ');
+    std::ranges::replace(text, '\r', ' ');
+    const json ms_value = params.value("ms", json{5000});
+    if (!ms_value.is_number_integer() || ms_value.get<s64>() < 1 ||
+        ms_value.get<s64>() > MAX_NOTIFY_MS) {
+        throw std::runtime_error{fmt::format("ms must be an integer of 1 to {}", MAX_NOTIFY_MS)};
+    }
+    const int ms = ms_value.get<int>();
+    std::scoped_lock lock{g_notify_mutex};
+    if (!g_notify) {
+        throw std::runtime_error{"this frontend has no status bar"};
+    }
+    g_notify(text, ms);
+    return {{"shown", true}, {"ms", ms}};
+}
+
 } // Anonymous namespace
 
 std::vector<float> TimeRamp(float from, float to) {
@@ -623,6 +661,11 @@ void SetRunControl(RunControl control) {
     g_control = std::move(control);
 }
 
+void SetStatusNotify(StatusNotify notify) {
+    std::scoped_lock lock{g_notify_mutex};
+    g_notify = std::move(notify);
+}
+
 std::span<const LiveSwitchInfo> LiveSwitches() {
     return SWITCH_INFO;
 }
@@ -651,6 +694,7 @@ void AddTrainerHandlers(Handlers& handlers, System& system, RunState run,
     add("step_frames", StepFrames);
     add("time_control", TimeControl);
     add("switches", Switches);
+    add("notify", Notify);
 }
 
 } // namespace Core::Nx2Debug
