@@ -67,6 +67,10 @@ constexpr size_t MAX_INPUT_STEPS = 6000;
 /// Presents one measured input holds at most: the present-time ring, less 256 presents of margin
 /// for presents that land while the measurement is read.
 constexpr u64 MAX_MEASURED_PRESENTS = std::tuple_size_v<decltype(g_nx2_present_times_ns)> - 256;
+/// The pre-roll ring of record_anchor: 5 minutes at 60 presents/s, and half the steps of a call,
+/// so a pre-roll and its clip can still fit one input_sequence call.
+constexpr u64 MAX_PRE_ROLL_PRESENTS = 18000;
+constexpr size_t MAX_PRE_ROLL_STEPS = 3000;
 
 constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
     {"A", HID::NpadButton::A},         {"B", HID::NpadButton::B},
@@ -1193,20 +1197,44 @@ json Input(ToolState& state, const json& params, const ClientGone& client_gone) 
     return RunInput(state, {ParseInputStep(step)}, params, client_gone);
 }
 
+/// {steps, pre_roll?, ...}: pre_roll (an input_record stop reply's pre_roll steps) plays first,
+/// so the clip starts pre_roll's frames after step 0's present, as in the live run. Both count
+/// against the limits of one call.
 json InputSequence(ToolState& state, const json& params, const ClientGone& client_gone) {
     const json& list = params.at("steps");
     if (!list.is_array() || list.empty() || list.size() > MAX_INPUT_STEPS) {
         throw std::runtime_error{fmt::format("steps must be an array of 1 to {}", MAX_INPUT_STEPS)};
     }
-    std::vector<InputStep> steps;
-    for (size_t index = 0; index < list.size(); ++index) {
-        try {
-            steps.push_back(ParseInputStep(list[index]));
-        } catch (const std::exception& error) {
-            throw std::runtime_error{fmt::format("step {}: {}", index, error.what())};
-        }
+    const json pre_roll = params.value("pre_roll", json::array());
+    if (!pre_roll.is_array() || pre_roll.size() + list.size() > MAX_INPUT_STEPS) {
+        throw std::runtime_error{
+            fmt::format("pre_roll must be an array; with steps at most {} steps", MAX_INPUT_STEPS)};
     }
-    return RunInput(state, steps, params, client_gone);
+    std::vector<InputStep> steps;
+    u64 pre_roll_frames = 0;
+    const auto parse = [&steps](const json& from, std::string_view name) {
+        for (size_t index = 0; index < from.size(); ++index) {
+            try {
+                steps.push_back(ParseInputStep(from[index]));
+            } catch (const std::exception& error) {
+                throw std::runtime_error{fmt::format("{} {}: {}", name, index, error.what())};
+            }
+        }
+    };
+    parse(pre_roll, "pre_roll step");
+    for (const InputStep& step : steps) {
+        if (step.ms != 0) {
+            throw std::runtime_error{"pre_roll needs frame steps, not ms"};
+        }
+        pre_roll_frames += step.frames;
+    }
+    parse(list, "step");
+    json result = RunInput(state, steps, params, client_gone);
+    if (!pre_roll.empty()) {
+        result["pre_roll_frames"] = pre_roll_frames;
+        result["clip_present"] = result["first_present"].get<u64>() + pre_roll_frames;
+    }
+    return result;
 }
 
 /// The process's one input_record recording. RecordPresent reads it on the present thread; the
@@ -1245,6 +1273,18 @@ struct Recorder {
     /// Mode "any": one npad update at each present's reply, as replays do, so the reply stick
     /// is exactly the newest npad entry the game reads next.
     bool npad_sync{};
+    /// record_anchor: the pre-roll ring and the anchor present it was marked with. The ring
+    /// records as mode "any" with npad_sync, and goes on through recordings.
+    std::optional<PreRollRing> pre_roll;
+    std::optional<u64> anchor;
+    /// The pre-roll of the recording running now: cut from the ring once the ring reached the
+    /// recording's start, before newer presents can push it out.
+    struct PreRollCut {
+        std::optional<u64> anchor;
+        u64 first_present;
+        std::vector<InputStep> steps;
+    };
+    std::optional<PreRollCut> cut;
 };
 
 Recorder& GetRecorder() {
@@ -1324,9 +1364,40 @@ void ClearRecordHooks(Recorder& recorder) {
     HID::g_npad_read_hook.store(nullptr, std::memory_order_release);
 }
 
-/// Mode "any": moves the open count into the recordings: its buttons with the sticks of the
-/// present's reply (or of its start, without a reply), and with the sticks of its start. False
-/// once a recording is truncated.
+void RecordPresent(u64 present);
+void RecordNpadRead(const HID::EmulatedController& controller, HID::NpadButton held,
+                    const HID::AnalogSticks& sticks);
+
+/// Installs the hooks of a recording or of the pre-roll ring; the reply hook only once.
+void InstallRecordHooks(Recorder& recorder) {
+    g_nx2_present_hook.store(RecordPresent, std::memory_order_release);
+    if (recorder.any) {
+        HID::g_npad_read_hook.store(RecordNpadRead, std::memory_order_release);
+        if (!recorder.uses_reply_hook) {
+            recorder.uses_reply_hook = true;
+            UseReplyHook();
+        }
+    }
+}
+
+/// Takes the running recording's pre-roll from the ring once the ring holds every present
+/// before the recording's start, or at once with now (the recording stops).
+void CutPreRoll(Recorder& recorder, bool now) {
+    if (!recorder.recording || !recorder.pre_roll || recorder.cut) {
+        return;
+    }
+    const u64 start = recorder.recording->StartPresent();
+    if (!now && recorder.pre_roll->NextPresent() < start) {
+        return;
+    }
+    recorder.cut = Recorder::PreRollCut{.anchor = recorder.anchor,
+                                        .first_present = recorder.pre_roll->FirstPresent(),
+                                        .steps = recorder.pre_roll->StepsBefore(start)};
+}
+
+/// Mode "any": moves the open count into the pre-roll ring and the recordings: its buttons with
+/// the sticks of the present's reply (or of its start, without a reply), and with the sticks of
+/// its start. False once a recording is truncated.
 bool CloseCount(Recorder& recorder) {
     if (!recorder.open) {
         return true;
@@ -1335,6 +1406,13 @@ bool CloseCount(Recorder& recorder) {
     recorder.open.reset();
     HID::InjectedInput at_reply = open.reply_input.value_or(open.input);
     at_reply.buttons = open.input.buttons;
+    if (recorder.pre_roll) {
+        recorder.pre_roll->Add(open.present, at_reply);
+        CutPreRoll(recorder, false);
+    }
+    if (!recorder.recording) {
+        return true;
+    }
     const bool kept = recorder.recording->Add(open.present, at_reply);
     return recorder.at_count->Add(open.present, open.input) && kept;
 }
@@ -1346,15 +1424,16 @@ void RecordPresent(u64 present) {
     const auto counted = std::chrono::steady_clock::now();
     Recorder& recorder = GetRecorder();
     KitLock lock{recorder.mutex, "recorder mutex", __func__};
-    if (!recorder.recording || recorder.recording->Truncated() ||
-        present < recorder.recording->StartPresent() ||
+    const bool recording = recorder.recording && !recorder.recording->Truncated() &&
+                           present >= recorder.recording->StartPresent();
+    if ((!recording && !recorder.pre_roll) ||
         (recorder.open && present <= recorder.open->present)) {
         return;
     }
     const HID::InjectedInput input = GameInput(recorder.sources);
     const bool kept =
         recorder.any ? CloseCount(recorder) : recorder.recording->Add(present, input);
-    if (!kept) {
+    if (!kept && !recorder.pre_roll) {
         ClearRecordHooks(recorder);
         return;
     }
@@ -1460,6 +1539,105 @@ void StopRecording() {
     recorder.at_count.reset();
     recorder.open.reset();
     recorder.sources = {};
+    recorder.pre_roll.reset();
+    recorder.anchor.reset();
+    recorder.cut.reset();
+}
+
+/// The pre-roll ring for status and record_anchor replies. lost_presents: the presents after the
+/// anchor that the ring does not hold (it was armed late, or the lead is longer than the ring).
+json PreRollStatus(const Recorder& recorder) {
+    if (!recorder.pre_roll) {
+        return {{"armed", false}};
+    }
+    const u64 first = recorder.pre_roll->FirstPresent();
+    return {{"armed", true},
+            {"anchor_present", recorder.anchor ? json(*recorder.anchor) : json(nullptr)},
+            {"first_present", first},
+            {"presents", recorder.pre_roll->NextPresent() - first},
+            {"lost_presents", recorder.anchor ? json(first - (*recorder.anchor + 1)) : json(nullptr)},
+            {"max_presents", MAX_PRE_ROLL_PRESENTS},
+            {"max_steps", MAX_PRE_ROLL_STEPS}};
+}
+
+/// The stop reply's pre_roll: the steps from first_present to the recording's start, and how
+/// many of those presents had input.
+json PreRollJson(const Recorder::PreRollCut& cut) {
+    json steps = json::array();
+    u64 presents = 0;
+    u64 input_presents = 0;
+    for (const InputStep& step : cut.steps) {
+        steps.push_back(InputStepJson(step));
+        presents += step.frames;
+        input_presents += IsNeutral(step.input) ? 0 : step.frames;
+    }
+    return {{"anchor_present", cut.anchor ? json(*cut.anchor) : json(nullptr)},
+            {"first_present", cut.first_present},
+            {"presents", presents},
+            {"lost_presents", cut.anchor ? json(cut.first_present - (*cut.anchor + 1)) : json(nullptr)},
+            {"input_presents", input_presents},
+            {"steps", std::move(steps)}};
+}
+
+/// {} (re)starts the pre-roll ring at the next present, with no anchor yet; {present: N} marks
+/// the anchor (the ring then keeps presents after N; it starts first when it is off); {off: true}
+/// stops it. Refused while a recording runs, whose pre-roll is the ring up to its start.
+json RecordAnchor(ToolState& state, const json& params) {
+    for (const auto& [key, value] : params.items()) {
+        if (key != "present" && key != "off") {
+            throw std::runtime_error{fmt::format("unknown key \"{}\": want present or off", key)};
+        }
+    }
+    RequireKitHooks("record_anchor");
+    const bool off = params.value("off", false);
+    std::optional<u64> anchor;
+    if (params.contains("present")) {
+        const json& value = params.at("present");
+        if (!value.is_number_integer() || value.get<s64>() < 0) {
+            throw std::runtime_error{"present must be a present count of 0 or more"};
+        }
+        anchor = value.get<u64>();
+    }
+    if (off && anchor) {
+        throw std::runtime_error{"give present or off, not both"};
+    }
+    const auto sources = RecordedControllers(state);
+    Recorder& recorder = GetRecorder();
+    KitLock lock{recorder.mutex, "recorder mutex", __func__};
+    if (recorder.recording) {
+        throw std::runtime_error{fmt::format("a recording runs since present {}; stop it first",
+                                             recorder.recording->StartPresent())};
+    }
+    if (off) {
+        if (recorder.pre_roll) {
+            ClearRecordHooks(recorder);
+            recording_active.store(false, std::memory_order_relaxed);
+            recorder.pre_roll.reset();
+            recorder.anchor.reset();
+            recorder.open.reset();
+            recorder.sources = {};
+        }
+        return PreRollStatus(recorder);
+    }
+    const u64 now = g_nx2_present_count.load(std::memory_order_relaxed);
+    if (!anchor || !recorder.pre_roll) {
+        recorder.pre_roll.emplace(now + 1, MAX_PRE_ROLL_PRESENTS, MAX_PRE_ROLL_STEPS);
+        recorder.anchor.reset();
+        if (!recorder.uses_reply_hook) {
+            recorder.sources = sources;
+            recorder.any = true;
+            recorder.npad_sync = true;
+            recorder.open.reset();
+            InstallRecordHooks(recorder);
+            recording_active.store(true, std::memory_order_relaxed);
+            GetWatchdog().Ensure();
+        }
+    }
+    if (anchor) {
+        recorder.anchor = anchor;
+        recorder.pre_roll->DropBefore(*anchor + 1);
+    }
+    return PreRollStatus(recorder);
 }
 
 /// {action: "start" | "status" | "stop", mode?: "any" | "sample"}. Records the input the game
@@ -1491,20 +1669,23 @@ json InputRecord(ToolState& state, const json& params) {
                 "already recording since present {}; stop it first",
                 recorder.recording->StartPresent())};
         }
+        if (recorder.pre_roll && mode != "any") {
+            throw std::runtime_error{
+                "the pre-roll ring (record_anchor) records in mode any; turn it off first"};
+        }
         recorder.sources = RecordedControllers(state);
         recorder.controller_name = picked.second;
         recorder.any = mode == "any";
         recorder.npad_sync = recorder.any && npad_sync;
-        recorder.open.reset();
+        // The ring's open count goes on: it is the last present of the pre-roll.
+        if (!recorder.pre_roll) {
+            recorder.open.reset();
+        }
         recorder.blocked_sum_us = recorder.blocked_max_us = recorder.blocked_presents = 0;
         // The hooks go in first. A present counted meanwhile waits for the lock, then is
         // recorded or ignored by the start present read below, so none is lost.
-        g_nx2_present_hook.store(RecordPresent, std::memory_order_release);
-        if (recorder.any) {
-            HID::g_npad_read_hook.store(RecordNpadRead, std::memory_order_release);
-            recorder.uses_reply_hook = true;
-            UseReplyHook();
-        }
+        InstallRecordHooks(recorder);
+        recorder.cut.reset();
         recorder.recording.emplace(g_nx2_present_count.load(std::memory_order_relaxed) + 1,
                                    MAX_INPUT_FRAMES, MAX_INPUT_STEPS);
         recording_active.store(true, std::memory_order_relaxed);
@@ -1524,18 +1705,26 @@ json InputRecord(ToolState& state, const json& params) {
     if (action == "status") {
         json controllers = ControllerStates(RecordedControllers(state));
         KitLock lock{recorder.mutex, "recorder mutex", __func__};
+        json result;
         if (!recorder.recording) {
-            return {{"recording", false}, {"controllers", std::move(controllers)}};
+            result = {{"recording", false}, {"controllers", std::move(controllers)}};
+        } else {
+            const bool open_in_recording =
+                recorder.open && recorder.open->present >= recorder.recording->StartPresent();
+            result = {{"recording", true},
+                      {"start_present", recorder.recording->StartPresent()},
+                      {"presents", recorder.recording->Presents() + (open_in_recording ? 1 : 0)},
+                      {"steps", recorder.recording->Steps().size()},
+                      {"controller", recorder.controller_name},
+                      {"mode", recorder.any ? "any" : "sample"},
+                      {"truncated", recorder.recording->Truncated() ||
+                                        (recorder.at_count && recorder.at_count->Truncated())},
+                      {"controllers", std::move(controllers)}};
         }
-        return {{"recording", true},
-                {"start_present", recorder.recording->StartPresent()},
-                {"presents", recorder.recording->Presents() + (recorder.open ? 1 : 0)},
-                {"steps", recorder.recording->Steps().size()},
-                {"controller", recorder.controller_name},
-                {"mode", recorder.any ? "any" : "sample"},
-                {"truncated", recorder.recording->Truncated() ||
-                                  (recorder.at_count && recorder.at_count->Truncated())},
-                {"controllers", std::move(controllers)}};
+        if (recorder.pre_roll) {
+            result["pre_roll"] = PreRollStatus(recorder);
+        }
+        return result;
     }
     if (action == "stop") {
         std::optional<InputRecording> recording;
@@ -1544,15 +1733,21 @@ json InputRecord(ToolState& state, const json& params) {
         bool any{};
         bool npad_sync{};
         u64 blocked_sum_us{}, blocked_max_us{}, blocked_presents{};
+        std::optional<Recorder::PreRollCut> cut;
         {
             KitLock lock{recorder.mutex, "recorder mutex", __func__};
             if (!recorder.recording) {
                 throw std::runtime_error{"not recording"};
             }
-            ClearRecordHooks(recorder);
-            recording_active.store(false, std::memory_order_relaxed);
+            if (!recorder.pre_roll) {
+                ClearRecordHooks(recorder);
+                recording_active.store(false, std::memory_order_relaxed);
+            }
             // The count running now ends here: its step holds what the game got so far.
             static_cast<void>(CloseCount(recorder));
+            CutPreRoll(recorder, true);
+            cut = std::move(recorder.cut);
+            recorder.cut.reset();
             any = recorder.any;
             npad_sync = recorder.npad_sync;
             recording = std::move(recorder.recording);
@@ -1562,7 +1757,12 @@ json InputRecord(ToolState& state, const json& params) {
             blocked_sum_us = recorder.blocked_sum_us;
             blocked_max_us = recorder.blocked_max_us;
             blocked_presents = recorder.blocked_presents;
-            recorder.sources = {};
+            if (recorder.pre_roll) {
+                // The ring goes on as before the recording.
+                recorder.npad_sync = true;
+            } else {
+                recorder.sources = {};
+            }
             name = std::move(recorder.controller_name);
         }
         const auto steps_json = [](const InputRecording& from) {
@@ -1586,6 +1786,9 @@ json InputRecord(ToolState& state, const json& params) {
                 {"presents", blocked_presents},
                 {"mean", blocked_presents ? blocked_sum_us / blocked_presents : 0},
                 {"max", blocked_max_us}};
+        }
+        if (cut) {
+            result["pre_roll"] = PreRollJson(*cut);
         }
         return result;
     }
@@ -1651,7 +1854,8 @@ json Features(ToolState&, const json&) {
         result = {{"features",
                    {"input_ms", "measure", "input_record", "record_mode", "start_present",
                     "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
-                    "step_frames", "time_control", "time_trace", "switches"}},
+                    "step_frames", "time_control", "time_trace", "switches", "record_anchor",
+                    "pre_roll"}},
                   {"kit", 2},
                   {"kit_hooks", true}};
     }
@@ -1692,6 +1896,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},
         {"input_record", handler(InputRecord)},
+        {"record_anchor", handler(RecordAnchor)},
         {"luma_watch", waiting(LumaWatch)},
     };
     AddTrainerHandlers(handlers, state->system,
@@ -2013,6 +2218,79 @@ bool InputRecording::Add(u64 present, const HID::InjectedInput& input) {
     next_present += frames;
     truncated = frames < wanted;
     return !truncated;
+}
+
+namespace {
+
+bool SameInput(const HID::InjectedInput& a, const HID::InjectedInput& b) {
+    const auto same_stick = [](const std::optional<HID::AnalogStickState>& x,
+                               const std::optional<HID::AnalogStickState>& y) {
+        return x.has_value() == y.has_value() && (!x || (x->x == y->x && x->y == y->y));
+    };
+    return a.buttons == b.buttons && same_stick(a.left, b.left) && same_stick(a.right, b.right);
+}
+
+} // Anonymous namespace
+
+bool IsNeutral(const HID::InjectedInput& input) {
+    const auto centred = [](const std::optional<HID::AnalogStickState>& stick) {
+        return !stick || (stick->x == 0 && stick->y == 0);
+    };
+    return input.buttons == HID::NpadButton::None && centred(input.left) && centred(input.right);
+}
+
+PreRollRing::PreRollRing(u64 first_present_, u64 max_presents_, size_t max_steps_)
+    : first_present{first_present_}, next_present{first_present_}, max_presents{max_presents_},
+      max_steps{max_steps_} {}
+
+void PreRollRing::Add(u64 present, const HID::InjectedInput& input) {
+    if (present < next_present) {
+        return;
+    }
+    const u64 frames = present - next_present + 1;
+    if (!steps.empty() && SameInput(steps.back().input, input)) {
+        steps.back().frames += frames;
+    } else {
+        steps.push_back({.input = input, .frames = frames});
+    }
+    next_present += frames;
+    if (next_present - first_present > max_presents) {
+        DropBefore(next_present - max_presents);
+    }
+    while (steps.size() > max_steps) {
+        first_present += steps.front().frames;
+        steps.pop_front();
+    }
+}
+
+void PreRollRing::DropBefore(u64 present) {
+    while (!steps.empty() && first_present < present) {
+        InputStep& front = steps.front();
+        if (first_present + front.frames <= present) {
+            first_present += front.frames;
+            steps.pop_front();
+        } else {
+            front.frames -= present - first_present;
+            first_present = present;
+        }
+    }
+    if (steps.empty()) {
+        first_present = next_present = (std::max)(next_present, present);
+    }
+}
+
+std::vector<InputStep> PreRollRing::StepsBefore(u64 end) const {
+    std::vector<InputStep> result;
+    u64 at = first_present;
+    for (const InputStep& step : steps) {
+        if (at >= end) {
+            break;
+        }
+        result.push_back(step);
+        result.back().frames = (std::min)(step.frames, end - at);
+        at += step.frames;
+    }
+    return result;
 }
 
 std::optional<HID::InjectedInput> InputAtTime(std::span<const InputStep> steps, u64 elapsed_us) {

@@ -31,6 +31,12 @@ START_PRESENT = {"type": "integer", "minimum": 1,
                                 "fails if it has passed. The reply's landed_present proves it."}
 STICK = {"type": "array", "items": {"type": "number", "minimum": -1, "maximum": 1},
          "minItems": 2, "maxItems": 2, "description": "[x, y], up is +y"}
+FRAME_STEP = {"type": "object", "properties": {
+    "buttons": {"type": "array", "items": {"type": "string", "enum": BUTTONS}},
+    "left_stick": STICK,
+    "right_stick": STICK,
+    "frames": {"type": "integer", "minimum": 1, "maximum": 36000},
+}, "required": ["frames"]}
 
 TOOLS = [
     {
@@ -250,18 +256,14 @@ TOOLS = [
         "description": "Runs input steps back to back, each for exactly its 'frames' presented "
                        "frames, so a camera pan or walk replays identically for an A/B test. A "
                        "step without buttons or sticks leaves the owner's input alone. At most "
-                       "6000 steps and 36000 frames.",
+                       "6000 steps and 36000 frames, pre_roll included.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "steps": {"type": "array", "minItems": 1, "maxItems": 6000,
-                          "items": {"type": "object", "properties": {
-                "buttons": {"type": "array", "items": {"type": "string", "enum": BUTTONS}},
-                "left_stick": STICK,
-                "right_stick": STICK,
-                "frames": {"type": "integer", "minimum": 1, "maximum": 36000},
-            },
-                                    "required": ["frames"]}},
+                "steps": {"type": "array", "minItems": 1, "maxItems": 6000, "items": FRAME_STEP},
+                "pre_roll": {"type": "array", "maxItems": 3000, "items": FRAME_STEP,
+                             "description": "A recording's pre_roll steps, played before steps; "
+                                            "the reply has clip_present and pre_roll_frames."},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900},
                 "start_present": START_PRESENT,
             },
@@ -284,6 +286,20 @@ TOOLS = [
                                                    "given during a present. sample: the input "
                                                    "at the present only."}},
             "required": ["action"],
+        },
+    },
+    {
+        "name": "record_anchor",
+        "description": "The recorder's pre-roll ring: {} starts it (again) at the next present, "
+                       "{present: N} marks the load's anchor (the ring keeps presents after N), "
+                       "{off: true} stops it. A recording started while it runs gets 'pre_roll' "
+                       "in its stop reply: the input from the anchor to the start. At most 18000 "
+                       "presents and 3000 steps; 'lost_presents' counts what it lost. Costs the "
+                       "work of a recording at each present while armed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"present": {"type": "integer", "minimum": 0},
+                           "off": {"type": "boolean"}},
         },
     },
     {
@@ -415,7 +431,7 @@ def default_timeout(name, params):
         # The lead before start_present is not known here: wait as long as the server may.
         return 900
     if name in ("input", "input_sequence"):
-        steps = params.get("steps", []) if name == "input_sequence" else [params]
+        steps = params.get("pre_roll", []) + params.get("steps", []) if name == "input_sequence" else [params]
         return sum(int(step.get("frames", 0)) for step in steps) // 20 + 10
     return 5
 

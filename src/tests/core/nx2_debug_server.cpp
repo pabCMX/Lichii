@@ -728,6 +728,48 @@ TEST_CASE("Input recordings merge equal presents and stop at their limits",
     REQUIRE(short_recording.Steps()[0].frames == 3);
 }
 
+TEST_CASE("Pre-roll rings keep the newest presents and cut at a present",
+          "[core][nx2_debug_server]") {
+    const auto in = [](s32 x) {
+        return Core::HID::InjectedInput{.buttons = {},
+                                        .left = Core::HID::AnalogStickState{.x = x, .y = 0},
+                                        .right = Core::HID::AnalogStickState{}};
+    };
+    const auto per_present = [](const std::vector<Core::Nx2Debug::InputStep>& steps) {
+        std::vector<s32> x;
+        for (const auto& step : steps) {
+            x.insert(x.end(), step.frames, step.input.left->x);
+        }
+        return x;
+    };
+    Core::Nx2Debug::PreRollRing ring{10, 6, 3};
+    ring.Add(9, in(1));
+    ring.Add(10, in(1));
+    ring.Add(11, in(1));
+    // Present 12 was skipped: it gets the input of 13.
+    ring.Add(13, in(2));
+    REQUIRE(per_present(ring.StepsBefore(100)) == std::vector<s32>{1, 1, 2, 2});
+    REQUIRE(per_present(ring.StepsBefore(13)) == std::vector<s32>{1, 1, 2});
+    // Past 6 presents the oldest leave; past 3 steps the oldest step leaves.
+    ring.Add(16, in(3));
+    REQUIRE(ring.FirstPresent() == 11);
+    REQUIRE(per_present(ring.StepsBefore(100)) == std::vector<s32>{1, 2, 2, 3, 3, 3});
+    ring.Add(17, in(4));
+    REQUIRE(ring.FirstPresent() == 12);
+    REQUIRE(ring.NextPresent() == 18);
+    REQUIRE(per_present(ring.StepsBefore(100)) == std::vector<s32>{2, 2, 3, 3, 3, 4});
+    ring.DropBefore(13);
+    REQUIRE(per_present(ring.StepsBefore(100)) == std::vector<s32>{2, 3, 3, 3, 4});
+    // An anchor after everything held: the ring starts again there.
+    ring.DropBefore(30);
+    REQUIRE(ring.FirstPresent() == 30);
+    ring.Add(29, in(5));
+    ring.Add(30, in(5));
+    REQUIRE(per_present(ring.StepsBefore(100)) == std::vector<s32>{5});
+    REQUIRE(Core::Nx2Debug::IsNeutral(in(0)));
+    REQUIRE_FALSE(Core::Nx2Debug::IsNeutral(in(1)));
+}
+
 TEST_CASE("Recorded input steps parse back to the same input", "[core][nx2_debug_server]") {
     using Core::HID::AnalogStickState;
     using Core::HID::HID_JOYSTICK_MAX;
@@ -1061,7 +1103,8 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
             json{{"features",
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
                    "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
-                   "step_frames", "time_control", "time_trace", "switches"}},
+                   "step_frames", "time_control", "time_trace", "switches", "record_anchor",
+                   "pre_roll"}},
                  {"kit", 2},
                  {"kit_hooks", true}});
 }
@@ -1292,6 +1335,7 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
         return false;
     };
     REQUIRE(refused("input_record", {{"action", "start"}}));
+    REQUIRE(refused("record_anchor", json::object()));
     REQUIRE(refused("luma_watch", {{"presents", 5}}));
     REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}},
                                        {"start_present", Core::g_nx2_present_count.load() + 100}}));
@@ -1302,4 +1346,153 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
             json{{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches"}},
                  {"kit", 2},
                  {"kit_hooks", false}});
+}
+
+TEST_CASE("The pre-roll ring holds the input from the anchor to a recording's start",
+          "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    s32 stick_x = 0;
+    controller.SetInputInjector([&stick_x] {
+        return std::optional{Core::HID::InjectedInput{
+            .buttons = {}, .left = Core::HID::AnalogStickState{.x = stick_x, .y = 0}, .right = {}}};
+    });
+    const auto old_count = Core::g_nx2_present_count.load();
+    const auto call = [&system](std::string_view method, const json& params) {
+        return Core::Nx2Debug::CallTool(system, method, params);
+    };
+    SCOPE_EXIT {
+        for (const auto& [method, params] : {std::pair{"input_record", json{{"action", "stop"}}},
+                                             std::pair{"record_anchor", json{{"off", true}}}}) {
+            try {
+                static_cast<void>(call(method, params));
+            } catch (const std::runtime_error&) {
+            }
+        }
+        controller.SetInputInjector({});
+        Core::g_nx2_present_count = old_count;
+    };
+    const auto present = [&stick_x](s32 x) {
+        stick_x = x;
+        const u64 count = ++Core::g_nx2_present_count;
+        if (const auto hook = Core::g_nx2_present_hook.load()) {
+            hook(count);
+        }
+        if (const auto hook = Core::g_nx2_present_reply_hook.load()) {
+            hook(count);
+        }
+        return count;
+    };
+    const auto sticks = [](const json& steps) {
+        std::vector<s32> x;
+        for (const json& step : steps) {
+            const auto parsed = Core::Nx2Debug::ParseInputStep(step);
+            x.insert(x.end(), parsed.frames, parsed.input.left->x);
+        }
+        return x;
+    };
+    // Armed before the load's anchor is known, as the harness does at the load.
+    const json armed = call("record_anchor", json::object());
+    REQUIRE(armed["armed"] == true);
+    REQUIRE(armed["anchor_present"].is_null());
+    REQUIRE(Core::g_nx2_present_hook.load() != nullptr);
+    present(100);
+    const u64 anchor = present(100);
+    const json marked = call("record_anchor", {{"present", anchor}});
+    REQUIRE(marked["anchor_present"] == anchor);
+    REQUIRE(marked["first_present"] == anchor + 1);
+    REQUIRE(marked["lost_presents"] == 0);
+    for (const s32 x : {0, 0, 0, 500, 500}) {
+        present(x);
+    }
+    const u64 start = call("input_record", {{"action", "start"}})["start_present"].get<u64>();
+    REQUIRE(start == anchor + 6);
+    REQUIRE_THROWS_WITH(call("record_anchor", json::object()),
+                        Catch::Matchers::StartsWith("a recording runs"));
+    present(700);
+    present(700);
+    const json stopped = call("input_record", {{"action", "stop"}});
+    REQUIRE(sticks(stopped["steps"]) == std::vector<s32>{700, 700});
+    const json& pre_roll = stopped["pre_roll"];
+    REQUIRE(pre_roll["anchor_present"] == anchor);
+    REQUIRE(pre_roll["first_present"] == anchor + 1);
+    REQUIRE(pre_roll["presents"] == 5);
+    REQUIRE(pre_roll["lost_presents"] == 0);
+    REQUIRE(pre_roll["input_presents"] == 2);
+    REQUIRE(sticks(pre_roll["steps"]) == std::vector<s32>{0, 0, 0, 500, 500});
+
+    // The ring goes on after the stop, so a second clip of this load also gets its pre-roll.
+    REQUIRE(Core::g_nx2_present_hook.load() != nullptr);
+    const json status = call("input_record", {{"action", "status"}});
+    REQUIRE(status["pre_roll"]["presents"] == 7);
+    REQUIRE_THROWS_WITH(call("input_record", {{"action", "start"}, {"mode", "sample"}}),
+                        Catch::Matchers::ContainsSubstring("mode any"));
+    REQUIRE(call("record_anchor", {{"off", true}})["armed"] == false);
+    REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
+    REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
+    REQUIRE(Core::HID::g_npad_read_hook.load() == nullptr);
+    // A recording with no ring has no pre_roll, as before.
+    static_cast<void>(call("input_record", {{"action", "start"}}));
+    present(1);
+    REQUIRE_FALSE(call("input_record", {{"action", "stop"}}).contains("pre_roll"));
+
+    // An anchor marked while the ring is off: the presents since the anchor are lost, and the
+    // reply says how many.
+    const u64 late = present(0);
+    present(0);
+    const u64 now = present(0);
+    const json lost = call("record_anchor", {{"present", late}});
+    REQUIRE(lost["first_present"] == now + 1);
+    REQUIRE(lost["lost_presents"] == now - late);
+}
+
+TEST_CASE("Input sequences play a pre-roll before the clip", "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    const auto old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        if (Core::g_nx2_present_hook.load() != nullptr) {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}}));
+        }
+        Core::g_nx2_present_count = old_count;
+        for (auto& timestamp : Core::g_nx2_present_times_ns) {
+            timestamp = 0;
+        }
+    };
+    const auto call = [&system](std::string_view method, const json& params) {
+        return Core::Nx2Debug::CallTool(system, method, params);
+    };
+    const json pre_roll = {{{"frames", 3}}, {{"left_stick", {0.5, 0.0}}, {"frames", 2}}};
+    const json clip = {{{"buttons", {"A"}}, {"frames", 2}}};
+    REQUIRE_THROWS_WITH(call("input_sequence", {{"pre_roll", {{{"ms", 5}}}}, {"steps", clip}}),
+                        Catch::Matchers::ContainsSubstring("frame steps"));
+    FakePresenter presenter;
+    FakeNpad npad{controller};
+    const u64 recording_start = call("input_record", {{"action", "start"}})["start_present"].get<u64>();
+    const u64 target = Core::g_nx2_present_count.load() + 50;
+    const json played = call("input_sequence",
+                             {{"pre_roll", pre_roll}, {"steps", clip}, {"start_present", target}});
+    const json recorded = call("input_record", {{"action", "stop"}});
+    REQUIRE(played["landed_present"] == target);
+    REQUIRE(played["frames"] == 7);
+    REQUIRE(played["pre_roll_frames"] == 5);
+    REQUIRE(played["clip_present"] == target + 5);
+    std::vector<Core::HID::InjectedInput> inputs;
+    for (const json& step : recorded["steps"]) {
+        const auto parsed = Core::Nx2Debug::ParseInputStep(step);
+        inputs.insert(inputs.end(), parsed.frames, parsed.input);
+    }
+    const u64 offset = target - recording_start;
+    REQUIRE(offset + 7 <= inputs.size());
+    REQUIRE(inputs[offset + 2].left->x == 0);
+    REQUIRE(inputs[offset + 3].left->x > Core::HID::HID_JOYSTICK_MAX / 3);
+    REQUIRE(inputs[offset + 4].buttons == Core::HID::NpadButton::None);
+    REQUIRE(inputs[offset + 5].buttons == Core::HID::NpadButton::A);
+    REQUIRE(inputs[offset + 6].buttons == Core::HID::NpadButton::A);
 }

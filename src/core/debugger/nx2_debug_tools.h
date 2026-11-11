@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <span>
@@ -133,6 +134,40 @@ private:
     size_t max_steps;
     bool truncated{};
 };
+
+/// The recorder's pre-roll (record_anchor): the input of each present since the ring started,
+/// run-length encoded as InputRecording does. It keeps only the newest max_presents presents and
+/// max_steps steps; older presents leave from the front, and FirstPresent() moves past them.
+class PreRollRing {
+public:
+    PreRollRing(u64 first_present, u64 max_presents, size_t max_steps);
+
+    /// As InputRecording::Add: a present before the next expected one is ignored; skipped
+    /// presents get this input too.
+    void Add(u64 present, const HID::InjectedInput& input);
+    /// Drops the presents before present. Presents before it that come later are ignored.
+    void DropBefore(u64 present);
+    /// The steps that cover [FirstPresent(), end), the last one cut at end.
+    [[nodiscard]] std::vector<InputStep> StepsBefore(u64 end) const;
+
+    [[nodiscard]] u64 FirstPresent() const {
+        return first_present;
+    }
+    /// One after the last present held: the ring covers [FirstPresent(), NextPresent()).
+    [[nodiscard]] u64 NextPresent() const {
+        return next_present;
+    }
+
+private:
+    std::deque<InputStep> steps;
+    u64 first_present;
+    u64 next_present;
+    u64 max_presents;
+    size_t max_steps;
+};
+
+/// No button and both sticks centred or not set: the input of an idle pad.
+[[nodiscard]] bool IsNeutral(const HID::InjectedInput& input);
 
 /// The input of the timed step active elapsed_us after the start; nothing from the end on.
 [[nodiscard]] std::optional<HID::InjectedInput> InputAtTime(std::span<const InputStep> steps,

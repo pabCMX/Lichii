@@ -596,6 +596,62 @@ mid-recording leaves it running until the limits, and the next `stop` ends it. W
 shuts down, `Service` discards the recording after the server thread has stopped, so the
 present path no longer reads the controller.
 
+### Recorder pre-roll (implemented)
+
+A recording holds the input from its `start` on. A replay of a scenario waits `start_offset`
+presents after the load's fade-in (the anchor) with no input, then plays the clip. Input the
+owner gives between the fade-in and Ctrl+F8 is therefore not replayed (H54-E1b, pair-05: about
+3,000 presents). The pre-roll ring keeps that input.
+
+**`record_anchor`** controls the ring. Every reply is the ring's state: `{armed: false}`, or
+`{armed: true, anchor_present, first_present, presents, lost_presents, max_presents, max_steps}`.
+
+| Call | What it does |
+| --- | --- |
+| `{}` | Starts the ring at the next present, or starts it again (a new load). No anchor yet: `anchor_present` and `lost_presents` are null. |
+| `{present: N}` | Marks the anchor: the ring keeps only the presents after N. N can be in the past. When the ring is off, it starts now, and the presents from N + 1 to now are lost (`lost_presents`). |
+| `{off: true}` | Stops the ring and removes its hooks. |
+
+All three fail while a recording runs. The harness calls `{}` before it chooses the Load list
+entry and `{present: <fade-in>}` when the anchor watch has found the fade-in, so the ring holds
+every present after the fade-in.
+
+While armed, the ring records each present as a recording in mode `"any"` with `npad_sync` does:
+the same hooks and the same per-present work (about four mutex locks, two controller reads and
+one extra npad update at each reply). Its limit is 18000 presents (5 minutes at 60 presents/s)
+and 3000 steps. Past either, the oldest presents leave the ring, and `first_present` moves on.
+When the ring is off, it costs nothing: the hooks are null, as without a recording.
+
+The ring goes on through a recording, so the second clip of one load also gets its pre-roll
+(which then holds the first clip's input). Mode `"sample"` is refused while the ring runs.
+
+The `stop` reply of a recording that started while the ring ran (also the Ctrl+F8 file) has:
+
+```json
+"pre_roll": {"anchor_present": 4700, "first_present": 4701, "presents": 2999,
+             "lost_presents": 0, "input_presents": 240, "steps": [...]}
+```
+
+- `steps` cover the presents from `first_present` to `start_present - 1`, in the format of
+  `steps`. `presents` is their frame sum.
+- `input_presents` counts the presents with a button or a stick off centre. 0 means the owner
+  gave no input before Ctrl+F8.
+- `lost_presents` is `first_present - (anchor_present + 1)`: presents after the anchor that the
+  ring does not hold, because the lead was longer than the ring or the anchor came while the
+  ring was off. Their input is unknown. The emulator does not fill them; a harness must warn.
+- `anchor_present` is null when nobody marked the anchor. A harness can then cut the steps at
+  the anchor it knows.
+
+A recording made without the ring has no `pre_roll` key, as before.
+
+**`input_sequence {pre_roll: [...], steps: [...], start_present?}`** plays `pre_roll` first and
+then `steps`. Step 0 of `pre_roll` is at `start_present`, so `steps` start `pre_roll_frames`
+presents later, the same offset from the anchor as in the live run when `start_present` is
+`anchor_present + 1`. The reply adds `pre_roll_frames` and `clip_present` (the present of the
+clip's step 0). `pre_roll` takes frame steps only, and `pre_roll` and `steps` together keep the
+limits of one call (6000 steps, 36000 frames). A client can also put the pre-roll steps in front
+of the clip itself: the game gets the same input.
+
 ### Phase 2: control and input (about 4 to 5 days)
 
 Done in the trainer kit, a layer on top of the Base (`explore/trainer-kit`,
