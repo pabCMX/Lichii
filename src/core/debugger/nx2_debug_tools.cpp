@@ -1177,6 +1177,8 @@ struct ReplaySync {
     bool sync{true};
     u64 start{};
     u64 end{};
+    /// The clip's first present: start plus the pre-roll's frames (start without a pre-roll).
+    u64 clip{};
     std::vector<u64> stale;
 };
 
@@ -1459,6 +1461,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         sync.sync = npad_sync;
         sync.start = start;
         sync.end = start + total;
+        sync.clip = start + clip_offset;
         sync.stale.clear();
         UseReplyHook();
     }
@@ -2345,13 +2348,16 @@ GamePadView ReadGamePad(System& system) {
                      .recording = recording_active.load(std::memory_order_relaxed),
                      .replaying = input_calls.load(std::memory_order_relaxed) != 0};
     // A frame-step call with the kit's hooks is in ReplaySync; its injector gives steps from
-    // start to end only. Other calls (ms steps, no hooks) give steps from the call on.
+    // start to end only, the pre-roll's up to clip. Other calls (ms steps, no hooks) give steps
+    // from the call on.
     if (view.replaying) {
         ReplaySync& sync = GetReplaySync();
         KitLock lock{sync.mutex, "replay sync mutex", __func__};
         if (sync.active) {
-            view.replaying = view.present >= sync.start && view.present < sync.end;
+            view.replaying = view.present >= sync.clip && view.present < sync.end;
             view.replay_wait = view.present < sync.start ? sync.start - view.present : 0;
+            view.pre_roll_left =
+                view.present >= sync.start && view.present < sync.clip ? sync.clip - view.present : 0;
         }
     }
     if (view.recording) {

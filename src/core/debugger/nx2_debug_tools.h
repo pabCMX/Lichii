@@ -322,6 +322,8 @@ struct GamePadView {
     bool replaying{};
     /// Presents until a frame-step call's first step (start_present), 0 when none waits.
     u64 replay_wait{};
+    /// While a call's pre-roll plays: presents until its clip starts, else 0.
+    u64 pre_roll_left{};
 };
 
 /// Reads the getters the npad updater and input_record read, on the calling thread. Writes

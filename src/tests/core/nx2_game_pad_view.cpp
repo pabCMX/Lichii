@@ -177,3 +177,61 @@ TEST_CASE("The trainer overlay shows WAIT before a scheduled clip and REPLAY onl
     REQUIRE_FALSE(view.replaying);
     REQUIRE(view.replay_wait == 0);
 }
+
+TEST_CASE("The trainer overlay shows PRE while a pre-roll plays, then REPLAY for the clip",
+          "[core][nx2_debug_server]") {
+    using namespace Core::HID;
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& player1 = *system.HIDCore().GetEmulatedController(NpadIdType::Player1);
+    player1.SetNpadStyleIndex(NpadStyleIndex::Fullkey);
+    player1.Connect();
+    const u64 old_count = Core::g_nx2_present_count.load();
+    SCOPE_EXIT {
+        player1.Disconnect();
+        Core::g_nx2_present_count = old_count;
+    };
+    const u64 start = Core::g_nx2_present_count.load() + 4;
+    std::thread call{[&] {
+        static_cast<void>(
+            Core::Nx2Debug::CallTool(system, "input_sequence",
+                                     {{"pre_roll", {{{"buttons", {"B"}}, {"frames", 2}}}},
+                                      {"steps", {{{"buttons", {"A"}}, {"frames", 3}}}},
+                                      {"start_present", start}}));
+    }};
+    SCOPE_EXIT {
+        if (call.joinable()) {
+            Core::g_nx2_present_count = start + 10;
+            call.join();
+        }
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while (Core::Nx2Debug::ReadGamePad(system).replay_wait == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    auto view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.replay_wait == 4);
+    REQUIRE(view.pre_roll_left == 0);
+
+    Core::g_nx2_present_count = start;
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.replay_wait == 0);
+    REQUIRE(view.pre_roll_left == 2);
+    REQUIRE_FALSE(view.replaying);
+    REQUIRE((view.buttons & NpadButton::B) == NpadButton::B);
+    Core::g_nx2_present_count = start + 1;
+    REQUIRE(Core::Nx2Debug::ReadGamePad(system).pre_roll_left == 1);
+
+    Core::g_nx2_present_count = start + 2; // the clip's first present
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.pre_roll_left == 0);
+    REQUIRE(view.replaying);
+    REQUIRE((view.buttons & NpadButton::A) == NpadButton::A);
+
+    Core::g_nx2_present_count = start + 5;
+    call.join();
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE_FALSE(view.replaying);
+    REQUIRE(view.pre_roll_left == 0);
+}
