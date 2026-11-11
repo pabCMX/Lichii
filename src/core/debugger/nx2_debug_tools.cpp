@@ -2340,6 +2340,31 @@ bool IsServiceRunning() {
     return running_services.load(std::memory_order_relaxed) != 0;
 }
 
+GamePadView ReadGamePad(System& system) {
+    GamePadView view{.present = g_nx2_present_count.load(std::memory_order_relaxed),
+                     .recording = recording_active.load(std::memory_order_relaxed),
+                     .replaying = input_calls.load(std::memory_order_relaxed) != 0};
+    const auto size = [](const HID::AnalogStickState& stick) {
+        return s64{stick.x} * stick.x + s64{stick.y} * stick.y;
+    };
+    auto& hid = system.HIDCore();
+    for (const auto id : {HID::NpadIdType::Player1, HID::NpadIdType::Handheld}) {
+        const HID::EmulatedController* const controller = hid.GetEmulatedController(id);
+        if (!controller->IsConnected()) {
+            continue;
+        }
+        view.buttons |= controller->GetNpadButtons().raw;
+        const HID::AnalogSticks sticks = controller->GetSticks();
+        if (size(sticks.left) > size(view.left)) {
+            view.left = sticks.left;
+        }
+        if (size(sticks.right) > size(view.right)) {
+            view.right = sticks.right;
+        }
+    }
+    return view;
+}
+
 u64 ParseShaderHash(std::string_view text) {
     const std::string_view digits =
         text.starts_with("0x") || text.starts_with("0X") ? text.substr(2) : text;
