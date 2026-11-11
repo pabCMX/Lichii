@@ -2344,6 +2344,16 @@ GamePadView ReadGamePad(System& system) {
     GamePadView view{.present = g_nx2_present_count.load(std::memory_order_relaxed),
                      .recording = recording_active.load(std::memory_order_relaxed),
                      .replaying = input_calls.load(std::memory_order_relaxed) != 0};
+    // A frame-step call with the kit's hooks is in ReplaySync; its injector gives steps from
+    // start to end only. Other calls (ms steps, no hooks) give steps from the call on.
+    if (view.replaying) {
+        ReplaySync& sync = GetReplaySync();
+        KitLock lock{sync.mutex, "replay sync mutex", __func__};
+        if (sync.active) {
+            view.replaying = view.present >= sync.start && view.present < sync.end;
+            view.replay_wait = view.present < sync.start ? sync.start - view.present : 0;
+        }
+    }
     if (view.recording) {
         Recorder& recorder = GetRecorder();
         KitLock lock{recorder.mutex, "recorder mutex", __func__};

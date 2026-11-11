@@ -318,7 +318,10 @@ struct GamePadView {
     bool recording{}; ///< input_record records (Ctrl+F8 or a client)
     u64 recorded{};   ///< presents recorded so far, as input_record status counts them
     bool record_full{}; ///< the recording is truncated and records no more
-    bool replaying{}; ///< an input or input_sequence call holds input
+    /// An input or input_sequence call gives the game a step now.
+    bool replaying{};
+    /// Presents until a frame-step call's first step (start_present), 0 when none waits.
+    u64 replay_wait{};
 };
 
 /// Reads the getters the npad updater and input_record read, on the calling thread. Writes
