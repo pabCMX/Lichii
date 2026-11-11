@@ -732,6 +732,36 @@ a present late.
 
 The shots have the size `minimap.locate` reads (1280x720).
 
+### Game values at each present (implemented)
+
+The server cannot answer `read_memory` during a clip. **`input_sequence {steps, watch: [{address,
+as}, ...], ...}`** reads up to 8 addresses at every present of the call and returns them with
+the reply. `as` is a `scan_memory` type (`u8`, `u16`, `u32`, `i32`, `f32`, `f64`); the address
+is a hex string or a number, aligned to the type's size. Frame steps only, and it needs the kit's
+hooks (not with `EDEN_NX2_KIT_HOOKS=0`).
+
+```json
+"watch": {"addresses": [{"address": "0x2b40e1c4", "as": "f32"}], "read_at": "reply",
+          "presents": 1600, "sampled": 1600,
+          "rows": [[6900, 97.25], [6901, 97.25], [6902, 102.5]]}
+```
+
+- One row per present of the call (pre-roll included): the present number, then one value per
+  address, in order. A value whose page was not mapped is null.
+- `read_at: "reply"`: the values are read in `g_nx2_present_reply_hook`, just before the game
+  gets the reply of that present and goes on to its next frame. They are the state after the
+  frame that made the present. The game thread is blocked in the present call then, but other
+  guest threads can still write.
+- `sampled` lower than `presents` means some presents had no reply hook call (for example the
+  last one, when the call ended before its reply).
+- Cost: the reply hook already runs during a frame-step `input_sequence` with the kit's hooks.
+  Without `watch` it makes one relaxed atomic load more per present; with `watch`, one lock and
+  up to 8 small reads. The rows are kept in memory for the call (at most 36000 presents x 8
+  values, about 4.6 MB).
+
+Use with `scan_memory`: find the address first, then replay a clip with `watch` to get the value
+at each present (H54-M1: Link's facing at each present of the back-flick).
+
 ### Phase 2: control and input (about 4 to 5 days)
 
 Done in the trainer kit, a layer on top of the Base (`explore/trainer-kit`,

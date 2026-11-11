@@ -286,6 +286,14 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "steps": {"type": "array", "minItems": 1, "maxItems": 6000, "items": FRAME_STEP},
+                "watch": {"type": "array", "maxItems": 8, "items": {
+                    "type": "object",
+                    "properties": {"address": {"type": "string"},
+                                   "as": {"type": "string",
+                                          "enum": ["u8", "u16", "u32", "i32", "f32", "f64"]}},
+                    "required": ["address", "as"]},
+                          "description": "Guest addresses read at every present of the call; the "
+                                         "reply's watch.rows is [[present, value, ...]]."},
                 "capture_frames": {"type": "array", "maxItems": 32,
                                    "items": {"type": "integer", "minimum": 0},
                                    "description": "Clip frames to save as 1280x720 PNGs during "
