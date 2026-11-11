@@ -522,6 +522,8 @@ private:
     QString GetTasStateDescription() const;
     /// Shows a running input_record, hotkey or debug-server started, in the status bar.
     void UpdatePresentRecordLabel();
+    /// Sets the status bar's REC label; the trainer overlay calls it whenever its REC changes.
+    void ShowPresentRecord(bool recording, u64 recorded, bool full);
     /// Shows message in the status bar's message label for milliseconds. Use it in place of
     /// QStatusBar::showMessage, which draws left of the permanent widgets: they start at the
     /// left edge here, so its text is not seen.

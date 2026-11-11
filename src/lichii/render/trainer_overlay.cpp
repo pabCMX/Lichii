@@ -101,6 +101,10 @@ void TrainerOverlay::Tick() {
     const TrainerHud::InputFrame before = frame;
     const bool trails_before = left_trail.Size() + right_trail.Size() != 0;
     ReadInput();
+    if (before.recording != frame.recording || before.recorded != frame.recorded ||
+        before.record_full != frame.record_full) {
+        emit RecordChanged(frame.recording, frame.recorded, frame.record_full);
+    }
     if (isHidden()) {
         show();
     } else if (!SameInput(before, frame) || trails_before) {

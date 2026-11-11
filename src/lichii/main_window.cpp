@@ -4642,6 +4642,8 @@ void MainWindow::OnToggleTrainerOverlay() {
             return !emulation_running ||
                    (ui->action_Fullscreen->isChecked() && UsingExclusiveFullscreen());
         });
+        connect(trainer_overlay, &TrainerOverlay::RecordChanged, this,
+                &MainWindow::ShowPresentRecord);
     }
     trainer_overlay->SetWanted(!trainer_overlay->Wanted());
     if (trainer_overlay->Wanted() && !emulation_running) {
@@ -5545,15 +5547,19 @@ void MainWindow::UpdatePresentRecordLabel() {
         present_record_label->clear();
         return;
     }
-    const auto status = Core::Nx2Debug::RecordInput(*QtCommon::system, "status");
-    if (!status["recording"].get<bool>()) {
+    // The overlay's source, so both show one count; the overlay also updates the label at once.
+    const Core::Nx2Debug::GamePadView view = Core::Nx2Debug::ReadGamePad(*QtCommon::system);
+    ShowPresentRecord(view.recording, view.recorded, view.record_full);
+}
+
+void MainWindow::ShowPresentRecord(bool recording, u64 recorded, bool full) {
+    if (!recording || !emulation_running) {
         present_record_label->clear();
         return;
     }
-    present_record_label->setText(
-        tr("REC INPUT %1 presents%2")
-            .arg(status["presents"].get<u64>())
-            .arg(status["truncated"].get<bool>() ? tr(" (full)") : QString{}));
+    present_record_label->setText(tr("REC INPUT %1 presents%2")
+                                      .arg(recorded)
+                                      .arg(full ? tr(" (full)") : QString{}));
 }
 
 void MainWindow::UpdateStatusBar() {
