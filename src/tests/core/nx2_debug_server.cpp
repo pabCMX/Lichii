@@ -898,12 +898,19 @@ TEST_CASE("Input recordings merge equal presents and stop at their limits",
     REQUIRE(recording.Steps()[0].input.left->x == 0);
     REQUIRE(recording.Steps()[1].frames == 2);
     REQUIRE(recording.Steps()[1].input.left->x == 100);
+    // Full of steps but not yet truncated: Takes says what the next Add does, and changes nothing.
+    REQUIRE(recording.Takes(14, b));
+    REQUIRE_FALSE(recording.Takes(14, a));
+    REQUIRE_FALSE(recording.Truncated());
     REQUIRE_FALSE(recording.Add(14, a));
     REQUIRE(recording.Truncated());
     REQUIRE(recording.Presents() == 4);
 
     Core::Nx2Debug::InputRecording short_recording{1, 3, 10};
     REQUIRE(short_recording.Add(1, a));
+    REQUIRE(short_recording.Takes(3, a));
+    REQUIRE_FALSE(short_recording.Takes(4, a)); // past the present limit
+    REQUIRE_FALSE(short_recording.Takes(1, a)); // already recorded
     REQUIRE_FALSE(short_recording.Add(5, a));
     REQUIRE(short_recording.Truncated());
     REQUIRE(short_recording.Presents() == 3);

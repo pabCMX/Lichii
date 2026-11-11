@@ -1732,14 +1732,24 @@ json ControllerStates(std::span<HID::EmulatedController* const> controllers) {
     return list;
 }
 
-/// The presents the running recording holds, as stop will return them: the open count only once
-/// it is in the recording, and not after truncation, when the pre-roll ring still opens counts.
-/// status and ReadGamePad (the overlay and the status bar) both count with it. Needs the lock.
+/// The step an open count closes into: its buttons with the sticks of the present's reply, or of
+/// its start without a reply.
+HID::InjectedInput ClosedInput(const Recorder::OpenCount& open) {
+    HID::InjectedInput input = open.reply_input.value_or(open.input);
+    input.buttons = open.input.buttons;
+    return input;
+}
+
+/// The presents the running recording holds, as a stop now would return them: the open count
+/// only once it is in the recording and when the recording still takes it (not when it is full
+/// or truncated, while the pre-roll ring still opens counts). status and ReadGamePad (the overlay
+/// and the status bar) both count with it. Needs the lock.
 u64 RecordedPresents(const Recorder& recorder) {
-    const bool open_in_recording = recorder.open &&
-                                   recorder.open->present >= recorder.recording->StartPresent() &&
-                                   !recorder.recording->Truncated();
-    return recorder.recording->Presents() + (open_in_recording ? 1 : 0);
+    const bool open_counts = recorder.open &&
+                             recorder.open->present >= recorder.recording->StartPresent() &&
+                             recorder.recording->Takes(recorder.open->present,
+                                                       ClosedInput(*recorder.open));
+    return recorder.recording->Presents() + (open_counts ? 1 : 0);
 }
 
 /// Whether the running recording is full and records no more. Needs the lock.
@@ -1794,8 +1804,7 @@ bool CloseCount(Recorder& recorder) {
     }
     const Recorder::OpenCount open = *recorder.open;
     recorder.open.reset();
-    HID::InjectedInput at_reply = open.reply_input.value_or(open.input);
-    at_reply.buttons = open.input.buttons;
+    const HID::InjectedInput at_reply = ClosedInput(open);
     if (recorder.pre_roll) {
         recorder.pre_roll->Add(open.present, at_reply);
         CutPreRoll(recorder, false);
@@ -2784,19 +2793,34 @@ InputRecording::InputRecording(u64 start_present_, u64 max_presents_, size_t max
     : start_present{start_present_}, next_present{start_present_}, max_presents{max_presents_},
       max_steps{max_steps_} {}
 
-bool InputRecording::Add(u64 present, const HID::InjectedInput& input) {
-    if (truncated || present < next_present) {
-        return !truncated;
-    }
+namespace {
+
+/// Whether input continues the last step of steps.
+bool ContinuesLastStep(const std::vector<InputStep>& steps, const HID::InjectedInput& input) {
     const auto same_stick = [](const std::optional<HID::AnalogStickState>& a,
                                const std::optional<HID::AnalogStickState>& b) {
         return a.has_value() == b.has_value() && (!a || (a->x == b->x && a->y == b->y));
     };
+    return !steps.empty() && steps.back().input.buttons == input.buttons &&
+           same_stick(steps.back().input.left, input.left) &&
+           same_stick(steps.back().input.right, input.right);
+}
+
+} // Anonymous namespace
+
+bool InputRecording::Takes(u64 present, const HID::InjectedInput& input) const {
+    return !truncated && present >= next_present &&
+           present - next_present + 1 <= max_presents - Presents() &&
+           (ContinuesLastStep(steps, input) || steps.size() < max_steps);
+}
+
+bool InputRecording::Add(u64 present, const HID::InjectedInput& input) {
+    if (truncated || present < next_present) {
+        return !truncated;
+    }
     const u64 wanted = present - next_present + 1;
     const u64 frames = (std::min)(wanted, max_presents - Presents());
-    const bool same = !steps.empty() && steps.back().input.buttons == input.buttons &&
-                      same_stick(steps.back().input.left, input.left) &&
-                      same_stick(steps.back().input.right, input.right);
+    const bool same = ContinuesLastStep(steps, input);
     if (frames != 0 && same) {
         steps.back().frames += frames;
     } else if (frames != 0 && steps.size() < max_steps) {
