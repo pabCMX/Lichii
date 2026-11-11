@@ -185,7 +185,7 @@ overwrite it; the debug server itself is serial. It is 0 for games that never co
 An older exe ignores parameters it does not know (`input_sequence {start_present: N}` then starts
 at the next present), so a client reads `features` first. An exe without the method answers
 "unknown method": it is older than the list. The names are `input_ms` (`ms` steps), `measure`,
-`input_record`, `record_mode` (`mode` any or sample), `start_present`, `landed_present`,
+`input_record`, `record_mode` (`mode`, now only `any`), `start_present`, `landed_present`,
 `screenshot_present`, `luma_watch` and `npad_sync`, and with the trainer kit `pause`,
 `step_frames`, `time_control`, `time_trace` (`time_control {trace}`) and `switches`
 (trainer-kit.md), and with the kit tools of 2026-11-11 `record_anchor` and `pre_roll` ("Recorder
@@ -193,8 +193,9 @@ pre-roll"), `capture_frames` ("Screenshots at clip frames"), `scan_memory` ("Mem
 `watch` ("Game values at each present"), and `notify` (trainer-kit.md). With `EDEN_NX2_KIT_HOOKS=0`, `record_anchor`,
 `capture_frames` and `watch` are left out with the other hook features; `pre_roll`,
 `scan_memory` and `notify` stay. With the trainer kit and an Ocarina boot with `EDEN_NX2_OOT_TIME_CONTROL=1`, the
-reply also has `time_control_block`, the guest address of the time control block. `kit` is 2 (since `npad_sync`) and rises when the contract of a listed feature
-changes. `status` stays as origin's.
+reply also has `time_control_block`, the guest address of the time control block. `kit` is 3 and rises when the contract of a listed feature
+changes. Kit 2 added `npad_sync`; kit 3 made it always on and removed the `npad_sync` key, mode
+`"sample"` and `stale_presents`. `status` stays as origin's.
 
 **`luma_watch`** `{presents?, cancel?, wait_s?}` finds a load's fade-in exactly, after the fact.
 `{presents: N}` (1 to 3600) arms the next N composites: each one renders a 256x144 copy of the
@@ -478,14 +479,15 @@ The game resumes and reads after the reply of present c (`g_nx2_present_reply_ho
 time from count to reply is shorter than the wait for the next update, the newest entry still
 holds step c - 1, and the game gets the old input for one more frame.
 
-**`npad_sync`** (default true, any frame-step `input` or `input_sequence`) removes that race:
+**`npad_sync`** (always on with the kit's hooks, any frame-step `input` or `input_sequence`)
+removes that race:
 at the reply of each covered present, the reply hook runs one npad update itself
 (`HID::UpdateNpadNow`, i.e. `ResourceManager::UpdateNpad`) before the game resumes. It takes the
 npad lock the 1 ms update takes, and each entry gets the next sampling number, so the game sees
 one more normal entry, the newest, with the present's step. The cost is one npad update per
 present (microseconds), only while a call runs. Side effects: the turbo-button phase advances one
-extra step per present. `"npad_sync": false` turns the update off for an A/B; calls with
-`measure` or `start_present` echo `npad_sync`.
+extra step per present. Since kit 3 there is no switch: a call with an `npad_sync` key fails
+with "npad_sync was removed", and replies do not echo it.
 
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
@@ -522,9 +524,9 @@ per game present, so its clips drift when replayed with `input_sequence` (H48).
 
 | Action | Result |
 | --- | --- |
-| `start` | `{recording: true, start_present, controller, mode, npad_sync}`. `mode` is `"any"` (default) or `"sample"`, see below. `npad_sync` (default true, mode `"any"` only) runs one npad update at each present's reply, as replays do. Fails while a recording runs. |
+| `start` | `{recording: true, start_present, controller, mode: "any", npad_sync: true}`. `mode` may be given, but only as `"any"` (mode `"sample"` was removed in kit 3). Every recording runs one npad update at each present's reply, as replays do. Fails while a recording runs. |
 | `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, mode, truncated, controllers}`, where `steps` is a count. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
-| `stop` | `{steps: [...], presents, start_present, end_present, controller, mode, npad_sync, truncated}`, and in mode `"any"` also `steps_at_count` and `blocked_us: {presents, mean, max}`. Fails when nothing records. The count still running is closed with what it had so far. |
+| `stop` | `{steps: [...], presents, start_present, end_present, controller, mode: "any", npad_sync: true, truncated, steps_at_count, blocked_us: {presents, mean, max}}`. `mode` and `npad_sync` are constants since kit 3; they stay so a saved file says how it was made (a file without `mode` is from mode `"sample"`). Fails when nothing records. The count still running is closed with what it had so far. |
 
 - `controller` is the controller a replay goes to: `player1`, or `handheld` when player 1 is
   not connected, the same choice `input` makes, made once at `start`. The recording itself reads
@@ -554,7 +556,7 @@ npad while player 1 is connected and idle. The first live clips (v1.0.0a-2026110
 the present count, so for a replay the input read at present c is exactly what the game gets
 during count c.
 
-Mode `"any"` (the default, and the hotkey's) also holds every button the game was given at any
+Mode `"any"` (the only mode since kit 3) also holds every button the game was given at any
 time during count c, from present c to present c + 1. The npad updater writes an entry for the
 game every 1 ms (`resource_manager.cpp`, `npad_update_ns`) into a 17-entry LIFO, about 28 entries
 per present at 35 FPS, and the owner's sword taps (Y) are often one present long or shorter. A
@@ -575,10 +577,10 @@ the reply value is what a game that reads input at the start of its frame gets. 
 deflection would turn a short flick into a whole present at full tilt, and the last read of the
 count is late by almost a whole frame of game logic.
 
-With `npad_sync` the recorder's reply sample is the values that npad update wrote (the npad read
-hook passes them), so a step holds exactly the newest entry the game read next, and a replay with `npad_sync` gives the game
-the same entry: record and replay describe the same thing. A recording with `npad_sync: false`
-(and every recording made before kit 2) can differ from what the game read by up to 1 ms of
+With the npad sync the recorder's reply sample is the values that npad update wrote (the npad
+read hook passes them), so a step holds exactly the newest entry the game read next, and a replay
+gives the game the same entry: record and replay describe the same thing. A recording made
+before kit 2, or with `npad_sync: false` in kit 2, can differ from what the game read by up to 1 ms of
 input plus the timer thread's lateness.
 
 A harness replays `steps`. `steps_at_count` is TEMPORARY: the same presents and buttons with the
@@ -586,14 +588,13 @@ stick at the count (the phase before 2026-11-10), for one A/B replay against `st
 dropped after that A/B. Both lists keep the step limit; `truncated` is true when either reached
 it, and only then can their frame sums differ. `blocked_us` is the time from count to reply over
 the presents that had a reply, in microseconds: the stick phase error of a recording made before
-this change. Mode `"sample"` has neither: it takes the stick at the count, as before.
+this change.
 
 Trade-off: if the game reads only the latest entry once per frame, mode `"any"` can add a press
 the game never saw (a press that began and ended between two of its reads). Which entries a game
 reads is not visible to the emulator: it reads the LIFO with its own code in shared memory, with
-no service call. Mode `"sample"` is the earlier behaviour: the input at the moment of present c
-only, so a press that starts later during count c shows from present c + 1. Use both on one
-fight clip to compare. When not recording, the cost is one atomic load per present and one per
+no service call. Mode `"sample"` (removed in kit 3) took the input at the moment of present c
+only and lost short taps. When not recording, the cost is one atomic load per present and one per
 npad update.
 
 What is kept: the 16 input buttons and both sticks, after turbo and after any injected input.
@@ -655,14 +656,14 @@ All three fail while a recording runs. The harness calls `{}` before it chooses 
 entry and `{present: <fade-in>}` when the anchor watch has found the fade-in, so the ring holds
 every present after the fade-in.
 
-While armed, the ring records each present as a recording in mode `"any"` with `npad_sync` does:
+While armed, the ring records each present as a recording does:
 the same hooks and the same per-present work (about four mutex locks, two controller reads and
 one extra npad update at each reply). Its limit is 18000 presents (5 minutes at 60 presents/s)
 and 3000 steps. Past either, the oldest presents leave the ring, and `first_present` moves on.
 When the ring is off, it costs nothing: the hooks are null, as without a recording.
 
 The ring goes on through a recording, so the second clip of one load also gets its pre-roll
-(which then holds the first clip's input). Mode `"sample"` is refused while the ring runs.
+(which then holds the first clip's input).
 
 The `stop` reply of a recording that started while the ring ran (also the Ctrl+F8 file) has:
 
@@ -836,13 +837,13 @@ gives ONE Error line (Error lines flush the log), again every 10 s while it last
 
 Thread names come from the OS (`pthread_getname_np`; on Windows only the id). The first stall
 also calls `KitStall::g_first_stall_hook` when a frontend set it (to write a minidump); nothing
-sets it on the Base. At start the server logs `Debug server kit 2, kit hooks on, features [...]`,
+sets it on the Base. At start the server logs `Debug server kit 3, kit hooks on, features [...]`,
 so every log names the kit the exe has.
 
 `EDEN_NX2_KIT_HOOKS=0` is the kill switch for a clean A/B. The server then installs none of the
-kit's hooks: `input_record`, `luma_watch`, `start_present` and an explicit `npad_sync: true` fail
+kit's hooks: `input_record`, `luma_watch` and `start_present` fail
 with an error that names the variable, frame-step calls run without the reply hook (no
-`npad_sync`), the GPU does not store the composite present, the trainer's
+npad sync), the GPU does not store the composite present, the trainer's
 step trace (`time_control {trace}`) is refused, and `features` answers `{features: ["input_ms",
 "measure"]` plus the trainer methods but not `time_trace`, and `pre_roll` and `scan_memory`,
 `kit, kit_hooks: false}`. `record_anchor`, `capture_frames` and `watch` are refused. Plain `input` and
