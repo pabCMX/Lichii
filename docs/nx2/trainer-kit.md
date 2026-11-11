@@ -69,8 +69,9 @@ reads the 16-byte block and writes nothing.
 
 The block's address is also in `features`, as `time_control_block` (for example `"0x855e6f00"`),
 while time control is installed: from the boot with `EDEN_NX2_OOT_TIME_CONTROL=1` on, at the
-title screen too. Without the variable, or before the game loads, the key is not there, so the
-`features` reply is the same as without the kit. The step trace area is at that address + 0x10.
+title screen too. Without the variable, before the game loads, or after it stops (System
+shutdown forgets the address), the key is not there, so the `features` reply is the same as
+without the kit. The step trace area is at that address + 0x10.
 Until 2026-11-10 the address was only in the disk log ("Module main loaded at" + 0x4e9ff00): the
 debug server's `log_tail` ring starts after the loader lines (HTPC-B5 D9).
 
