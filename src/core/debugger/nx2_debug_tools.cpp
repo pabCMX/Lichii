@@ -1410,6 +1410,8 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         if (timed) {
             throw std::runtime_error{"capture_frames needs frame steps, not ms"};
         }
+        // g_nx2_composite_present, which says when a target is due, moves only with the hooks.
+        RequireKitHooks("capture_frames");
         capture_frames = ClipFrames(params.at("capture_frames"), total - clip_offset,
                                     MAX_CAPTURE_FRAMES, "capture_frames");
         if (state.system.IsPaused()) {
@@ -2261,7 +2263,7 @@ json Features(ToolState&, const json&) {
     if (!Common::KitStall::HooksEnabled()) {
         result = {{"features",
                    {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
-                    "pre_roll", "capture_frames", "scan_memory"}},
+                    "pre_roll", "scan_memory"}},
                   {"kit", 2},
                   {"kit_hooks", false}};
     } else {

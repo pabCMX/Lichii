@@ -1524,11 +1524,12 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
     REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", true}}));
     REQUIRE(refused("input_sequence",
                     {{"steps", {{{"frames", 1}}}}, {"watch", {{{"address", "0x4000"}, {"as", "u32"}}}}}));
+    REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}}, {"capture_frames", {0}}}));
     REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
             json{{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
-                               "pre_roll", "capture_frames", "scan_memory"}},
+                               "pre_roll", "scan_memory"}},
                  {"kit", 2},
                  {"kit_hooks", false}});
 }
