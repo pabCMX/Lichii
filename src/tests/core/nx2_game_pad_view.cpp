@@ -127,8 +127,8 @@ TEST_CASE("The trainer overlay's REC count is the recorder's own", "[core][nx2_d
     present();
     REQUIRE(Core::Nx2Debug::ReadGamePad(system).recorded == full_at);
 
-    // With the pre-roll ring armed, counts still open after truncation; the mark keeps what stop
-    // returns.
+    // With the pre-roll ring armed, counts still open after truncation; the mark and status keep
+    // what stop returns.
     static_cast<void>(record("stop"));
     static_cast<void>(Core::Nx2Debug::CallTool(system, "record_anchor", nlohmann::json::object()));
     static_cast<void>(record("start"));
@@ -137,6 +137,7 @@ TEST_CASE("The trainer overlay's REC count is the recorder's own", "[core][nx2_d
     }
     view = Core::Nx2Debug::ReadGamePad(system);
     REQUIRE(view.record_full);
+    REQUIRE(view.recorded == record("status")["presents"].get<u64>());
     REQUIRE(view.recorded == record("stop")["presents"].get<u64>());
 }
 
