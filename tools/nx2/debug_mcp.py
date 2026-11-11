@@ -261,6 +261,11 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "steps": {"type": "array", "minItems": 1, "maxItems": 6000, "items": FRAME_STEP},
+                "capture_frames": {"type": "array", "maxItems": 32,
+                                   "items": {"type": "integer", "minimum": 0},
+                                   "description": "Clip frames to save as 1280x720 PNGs during "
+                                                  "the clip; the reply's captures name each file "
+                                                  "and the present it shows."},
                 "pre_roll": {"type": "array", "maxItems": 3000, "items": FRAME_STEP,
                              "description": "A recording's pre_roll steps, played before steps; "
                                             "the reply has clip_present and pre_roll_frames."},
@@ -432,7 +437,9 @@ def default_timeout(name, params):
         return 900
     if name in ("input", "input_sequence"):
         steps = params.get("pre_roll", []) + params.get("steps", []) if name == "input_sequence" else [params]
-        return sum(int(step.get("frames", 0)) for step in steps) // 20 + 10
+        # The emulator waits up to 5 s after the clip for capture_frames files.
+        extra = 6 if params.get("capture_frames") else 0
+        return sum(int(step.get("frames", 0)) for step in steps) // 20 + 10 + extra
     return 5
 
 

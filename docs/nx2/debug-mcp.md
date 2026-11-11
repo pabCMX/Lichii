@@ -655,6 +655,41 @@ pre-roll steps put in front of the clip: a client that splits a long clip into m
 a gap of at least one present without input between calls, and a gap inside the pre-roll would
 move the clip's start.
 
+### Screenshots at clip frames (implemented)
+
+The server answers one request at a time, and `input_sequence` holds it for the whole clip, so a
+client cannot ask for a screenshot during a clip (H54-E1-main: a `status` sent 2 s into a clip
+came back after its end).
+
+**`input_sequence {steps, capture_frames: [k, ...], ...}`** saves a 1280x720 PNG of each named
+clip frame. Frame k is the clip's step-0 present plus k (`clip_present + k` with a pre-roll,
+else `first_present + k`). At most 32 frames per call, distinct, each from 0 to the clip's frames
+minus 1. Frame steps only, and not while paused.
+
+The reply adds `capture_dir` and `captures`, one entry per frame:
+
+```json
+{"frame": 1214, "target_present": 6914, "present": 6914,
+ "path": ".../clip-1762876800-001/frame-01214.png"}
+```
+
+- `present` is the guest present the shot shows (the screenshot's `present`). It can be later
+  than `target_present`, so read it, not the target.
+- An entry with `error` and no `path` did not finish: "not requested" (no composite reached it
+  in time) or "did not finish in time" (5 s after the clip's end).
+- `capture_dir` (`<dump dir>/clip-<session>-<n>/`) also gets `captures.json`, the same list.
+
+How it works: the wait loop of the call (the server thread, every 1 ms while captures are named)
+requests the screenshot of frame k once the composite of the present before it has begun
+(`g_nx2_composite_present`), and notes the shown present when the shot is done. The renderer's
+callback thread encodes and writes the PNG, so the loop goes on at once. Nothing runs on the
+present path, and a call without `capture_frames` runs as before. A shot costs one frame readback
+on the GPU thread (as `screenshot` does) and about 1.5 MB of disk. Two adjacent frames can both be
+shot only when the second request goes in before its composite starts, so the second one can land
+a present late.
+
+The shots have the size `minimap.locate` reads (1280x720).
+
 ### Phase 2: control and input (about 4 to 5 days)
 
 Done in the trainer kit, a layer on top of the Base (`explore/trainer-kit`,
