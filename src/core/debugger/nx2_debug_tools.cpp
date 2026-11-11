@@ -2344,6 +2344,15 @@ GamePadView ReadGamePad(System& system) {
     GamePadView view{.present = g_nx2_present_count.load(std::memory_order_relaxed),
                      .recording = recording_active.load(std::memory_order_relaxed),
                      .replaying = input_calls.load(std::memory_order_relaxed) != 0};
+    if (view.recording) {
+        Recorder& recorder = GetRecorder();
+        KitLock lock{recorder.mutex, "recorder mutex", __func__};
+        if (recorder.recording) {
+            view.recorded = recorder.recording->Presents() + (recorder.open ? 1 : 0);
+            view.record_full = recorder.recording->Truncated() ||
+                               (recorder.at_count && recorder.at_count->Truncated());
+        }
+    }
     const auto size = [](const HID::AnalogStickState& stick) {
         return s64{stick.x} * stick.x + s64{stick.y} * stick.y;
     };

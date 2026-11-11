@@ -138,7 +138,10 @@ void StateMarks(QPainter& painter, const InputFrame& frame) {
         x += width + 6.0;
     };
     if (frame.recording) {
-        mark(QStringLiteral("● REC %1").arg(frame.recorded), REC);
+        mark(QStringLiteral("● REC %1%2")
+                 .arg(frame.recorded)
+                 .arg(frame.record_full ? QStringLiteral(" full") : QString{}),
+             REC);
     }
     if (frame.replaying) {
         mark(QStringLiteral("▶ REPLAY"), REPLAY);
