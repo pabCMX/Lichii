@@ -98,10 +98,19 @@ int main(int argc, char** argv) {
                          .now_ms = now,
                          .replaying = true};
     InputFrame idle{.now_ms = now};
+    // The marks before and during a replay with a pre-roll, and of the pre-roll ring.
+    InputFrame wait{.now_ms = now, .replay_wait = 3300};
+    InputFrame pre{.buttons = NpadButton::B, .now_ms = now, .pre_roll_left = 412};
+    InputFrame ring{.now_ms = now, .ring_armed = true, .ring_kept = 2741};
+    InputFrame ring_lost{.now_ms = now, .ring_armed = true, .ring_kept = 18000, .ring_lost = 604};
 
     Render(out + QStringLiteral("/hud-720-rec.png"), {1280, 720}, recording);
     Render(out + QStringLiteral("/hud-720-replay.png"), {1280, 720}, replaying);
     Render(out + QStringLiteral("/hud-720-idle.png"), {1280, 720}, idle);
+    Render(out + QStringLiteral("/hud-720-wait.png"), {1280, 720}, wait);
+    Render(out + QStringLiteral("/hud-720-pre.png"), {1280, 720}, pre);
+    Render(out + QStringLiteral("/hud-720-preroll.png"), {1280, 720}, ring);
+    Render(out + QStringLiteral("/hud-720-preroll-lost.png"), {1280, 720}, ring_lost);
     Render(out + QStringLiteral("/hud-2160-rec.png"), {3840, 2160}, recording);
     return 0;
 }
