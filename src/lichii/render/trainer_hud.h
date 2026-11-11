@@ -32,6 +32,10 @@ struct InputFrame {
     bool replaying{};
     u64 replay_wait{};   ///< presents until a scheduled replay starts
     u64 pre_roll_left{}; ///< presents until the clip, while the pre-roll plays
+    /// The pre-roll ring, shown only while it is armed and no recording runs.
+    bool ring_armed{};
+    u64 ring_kept{};
+    u64 ring_lost{};
 };
 
 /// The input panel's size in layout units.

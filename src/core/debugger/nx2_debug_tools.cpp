@@ -2345,7 +2345,6 @@ bool IsServiceRunning() {
 
 GamePadView ReadGamePad(System& system) {
     GamePadView view{.present = g_nx2_present_count.load(std::memory_order_relaxed),
-                     .recording = recording_active.load(std::memory_order_relaxed),
                      .replaying = input_calls.load(std::memory_order_relaxed) != 0};
     // A frame-step call with the kit's hooks is in ReplaySync; its injector gives steps from
     // start to end only, the pre-roll's up to clip. Other calls (ms steps, no hooks) give steps
@@ -2360,13 +2359,27 @@ GamePadView ReadGamePad(System& system) {
                 view.present >= sync.start && view.present < sync.clip ? sync.clip - view.present : 0;
         }
     }
-    if (view.recording) {
+    {
+        // Uncontended unless a recording or the pre-roll ring runs.
         Recorder& recorder = GetRecorder();
         KitLock lock{recorder.mutex, "recorder mutex", __func__};
+        // Not recording_active, which the pre-roll ring sets too.
+        view.recording = recorder.recording.has_value();
         if (recorder.recording) {
-            view.recorded = recorder.recording->Presents() + (recorder.open ? 1 : 0);
+            // As status counts them: the open count only once it is in the recording.
+            const bool open_in_recording =
+                recorder.open && recorder.open->present >= recorder.recording->StartPresent();
+            view.recorded = recorder.recording->Presents() + (open_in_recording ? 1 : 0);
             view.record_full = recorder.recording->Truncated() ||
                                (recorder.at_count && recorder.at_count->Truncated());
+        }
+        if (recorder.pre_roll) {
+            // As PreRollStatus counts them.
+            const u64 first = recorder.pre_roll->FirstPresent();
+            view.pre_roll_armed = true;
+            view.pre_roll_kept = recorder.pre_roll->NextPresent() - first;
+            view.pre_roll_lost =
+                recorder.anchor && first > *recorder.anchor + 1 ? first - (*recorder.anchor + 1) : 0;
         }
     }
     const auto size = [](const HID::AnalogStickState& stick) {

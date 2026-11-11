@@ -324,6 +324,11 @@ struct GamePadView {
     u64 replay_wait{};
     /// While a call's pre-roll plays: presents until its clip starts, else 0.
     u64 pre_roll_left{};
+    /// record_anchor's pre-roll ring: armed, the presents it holds, and the presents after the
+    /// anchor it no longer holds (record_anchor status lost_presents, 0 without an anchor).
+    bool pre_roll_armed{};
+    u64 pre_roll_kept{};
+    u64 pre_roll_lost{};
 };
 
 /// Reads the getters the npad updater and input_record read, on the calling thread. Writes
