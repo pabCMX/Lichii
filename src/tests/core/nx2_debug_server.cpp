@@ -387,6 +387,105 @@ TEST_CASE("Debug memory search spans mapped pages, stops at limits and resumes",
     REQUIRE(expired.next == 0x4000);
 }
 
+TEST_CASE("Memory scans keep typed hits and refine them by their change",
+          "[core][nx2_debug_server]") {
+    using Core::Nx2Debug::ScanOp;
+    using Core::Nx2Debug::ScanType;
+    GuestPages guest;
+    // Guest 0x4000 is host +0x1000, 0x5000 is +0, 0x7000 is +0x2000, 0x8000 is +0x3000.
+    const auto put = [&](size_t host, auto value) {
+        std::memcpy(guest.backing + host, &value, sizeof(value));
+    };
+    put(0x1010, 97.5f);   // 0x4010
+    put(0x0020, 98.0f);   // 0x5020
+    put(0x2030, 250.0f);  // 0x7030
+    put(0x1012, 95.0f);   // 0x4012: not aligned to 4, never a hit
+    auto& memory = guest.process.GetMemory();
+    const auto later = std::chrono::steady_clock::now() + 60s;
+    const std::array whole{std::pair<u64, u64>{0x4000, 0x9000}};
+    const auto range = [](double low, double high) {
+        return Core::Nx2Debug::ScanTest{.op = ScanOp::Range, .low = low, .high = high};
+    };
+    auto list = Core::Nx2Debug::ScanGuestMemory(memory, whole, ScanType::F32, range(90, 300), 100, later);
+    REQUIRE(list.addresses == std::vector<u64>{0x4010, 0x5020, 0x7030});
+    REQUIRE(list.complete);
+    REQUIRE_FALSE(list.truncated);
+    REQUIRE(list.scanned == 0x4000); // page 6 is not mapped
+
+    // Link turns: one value goes up, one down, one stays.
+    put(0x1010, 120.0f);
+    put(0x2030, 240.0f);
+    auto changed = list;
+    Core::Nx2Debug::RefineScan(memory, changed, {.op = ScanOp::Changed});
+    REQUIRE(changed.addresses == std::vector<u64>{0x4010, 0x7030});
+    auto up = changed;
+    Core::Nx2Debug::RefineScan(memory, up, {.op = ScanOp::Increased});
+    REQUIRE(up.addresses == std::vector<u64>{0x4010});
+    REQUIRE(Core::Nx2Debug::ScanValue(ScanType::F32, up.values[0]) == 120.0);
+    auto down = changed;
+    Core::Nx2Debug::RefineScan(memory, down, {.op = ScanOp::Decreased});
+    REQUIRE(down.addresses == std::vector<u64>{0x7030});
+    auto same = list;
+    Core::Nx2Debug::RefineScan(memory, same, {.op = ScanOp::Unchanged});
+    REQUIRE(same.addresses == std::vector<u64>{0x5020});
+    auto equal = list;
+    Core::Nx2Debug::RefineScan(memory, equal, {.op = ScanOp::Equal, .low = 240.0, .high = 240.0});
+    REQUIRE(equal.addresses == std::vector<u64>{0x7030});
+    auto narrowed = list;
+    Core::Nx2Debug::RefineScan(memory, narrowed, range(100, 130));
+    REQUIRE(narrowed.addresses == std::vector<u64>{0x4010});
+
+    // Integers are compared by their type; the hit cap truncates; ranges bound the scan.
+    put(0x3000, u32{0xffffffff}); // 0x8000
+    const auto equal_to = [](double value) {
+        return Core::Nx2Debug::ScanTest{.op = ScanOp::Equal, .low = value, .high = value};
+    };
+    REQUIRE(Core::Nx2Debug::ScanGuestMemory(memory, whole, ScanType::I32, equal_to(-1), 100, later)
+                .addresses == std::vector<u64>{0x8000});
+    REQUIRE(Core::Nx2Debug::ScanGuestMemory(memory, whole, ScanType::U32, equal_to(4294967295.0), 100,
+                                            later)
+                .addresses == std::vector<u64>{0x8000});
+    REQUIRE(Core::Nx2Debug::ScanGuestMemory(memory, whole, ScanType::U16, equal_to(65535), 100, later)
+                .addresses == std::vector<u64>{0x8000, 0x8002});
+    const auto capped = Core::Nx2Debug::ScanGuestMemory(memory, whole, ScanType::F32, range(90, 300), 2, later);
+    REQUIRE(capped.addresses == std::vector<u64>{0x4010, 0x5020});
+    REQUIRE(capped.truncated);
+    const std::array part{std::pair<u64, u64>{0x4011, 0x5024}};
+    REQUIRE(Core::Nx2Debug::ScanGuestMemory(memory, part, ScanType::F32, range(90, 300), 100, later)
+                .addresses == std::vector<u64>{0x5020});
+    const auto expired = Core::Nx2Debug::ScanGuestMemory(memory, whole, ScanType::F32, range(90, 300), 100,
+                                                         std::chrono::steady_clock::now());
+    REQUIRE_FALSE(expired.complete);
+    REQUIRE(expired.addresses.empty());
+}
+
+TEST_CASE("scan_memory checks its parameters before it reads memory", "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    const auto refusal = [&system](const json& params) -> std::string {
+        try {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "scan_memory", params));
+        } catch (const std::exception& error) {
+            return error.what();
+        }
+        return {};
+    };
+    using Catch::Matchers::ContainsSubstring;
+    REQUIRE(Core::Nx2Debug::CallTool(system, "scan_memory", {{"action", "drop"}}) == json{{"dropped", 0}});
+    REQUIRE_THAT(refusal({{"action", "refine"}, {"op", "changed"}}), ContainsSubstring("no scan list"));
+    REQUIRE_THAT(refusal({{"action", "first"}, {"type", "s16"}, {"value", 1}}),
+                 ContainsSubstring("want u8, u16, u32, i32, f32 or f64"));
+    REQUIRE_THAT(refusal({{"action", "first"}, {"type", "u32"}, {"value", 1.5}}),
+                 ContainsSubstring("whole"));
+    REQUIRE_THAT(refusal({{"action", "first"}, {"type", "f32"}, {"op", "changed"}}),
+                 ContainsSubstring("a first scan wants equal or range"));
+    REQUIRE_THAT(refusal({{"action", "first"}, {"type", "f32"}, {"min", 2}, {"max", 1}}),
+                 ContainsSubstring("min must not exceed max"));
+    REQUIRE_THAT(refusal({{"action", "first"}, {"type", "f32"}, {"value", 1}}),
+                 ContainsSubstring("no application process"));
+    REQUIRE_THAT(refusal({{"action", "peek"}}), ContainsSubstring("action must be"));
+}
+
 TEST_CASE("Debug memory patterns are hex byte pairs", "[core][nx2_debug_server]") {
     const std::vector<u8> one{0x00, 0x00, 0x80, 0x3f};
     REQUIRE(Core::Nx2Debug::ParseHexBytes("0000803f") == one);
@@ -1104,7 +1203,7 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
                    "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                    "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                   "pre_roll", "capture_frames"}},
+                   "pre_roll", "capture_frames", "scan_memory"}},
                  {"kit", 2},
                  {"kit_hooks", true}});
 }

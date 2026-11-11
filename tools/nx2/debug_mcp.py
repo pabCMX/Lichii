@@ -215,6 +215,31 @@ TOOLS = [
         },
     },
     {
+        "name": "scan_memory",
+        "description": "Typed search with a kept hit list (cheat-engine style). first: values of "
+                       "'type' equal to 'value' or from 'min' to 'max' in the game's writable "
+                       "heap and data. refine: keep hits that changed, unchanged, increased, "
+                       "decreased, equal or range. list: hits with kept and current values. "
+                       "drop: free the list. At most 2,000,000 hits ('truncated').",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["first", "refine", "list", "drop"]},
+                "type": {"type": "string", "enum": ["u8", "u16", "u32", "i32", "f32", "f64"]},
+                "op": {"type": "string", "enum": ["equal", "range", "changed", "unchanged",
+                                                  "increased", "decreased"]},
+                "value": {"type": "number"},
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "regions": {"type": "string", "enum": ["both", "heap", "data"]},
+                "budget_ms": {"type": "integer", "minimum": 100, "maximum": 60000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "read_gpu_memory",
         "description": "Reads up to 64 KiB of GPU virtual memory (e.g. query report and semaphore "
                        "buffers the game reads back) at the next frame end, as the GPU sees it, "
@@ -430,6 +455,8 @@ def default_timeout(name, params):
         return math.ceil(params.get("seconds", 5)) + 1
     if name == "sample":
         return int(params.get("seconds", 10)) + 90
+    if name == "scan_memory":
+        return int(params.get("budget_ms", 30000)) // 1000 + 10
     if name == "luma_watch":
         return int(params.get("wait_s", 0)) + 5
     if name in ("input", "input_sequence") and "start_present" in params:

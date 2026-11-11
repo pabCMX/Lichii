@@ -73,6 +73,10 @@ constexpr u64 MAX_PRE_ROLL_PRESENTS = 18000;
 constexpr size_t MAX_PRE_ROLL_STEPS = 3000;
 /// Screenshots one input_sequence capture_frames call saves at most (about 1.5 MB each).
 constexpr size_t MAX_CAPTURE_FRAMES = 32;
+/// scan_memory's kept hits: 16 bytes each, so 32 MB at most.
+constexpr size_t MAX_SCAN_HITS = 2'000'000;
+/// Hits one scan_memory list call returns at most.
+constexpr size_t MAX_SCAN_LIST = 1000;
 
 constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
     {"A", HID::NpadButton::A},         {"B", HID::NpadButton::B},
@@ -743,6 +747,200 @@ json SearchMemory(ToolState& state, const json& params) {
     if (!search.complete) {
         result["next"] = HexAddress(search.next);
     }
+    return result;
+}
+
+/// The process's one scan_memory list (as the recorder, it outlives a single call's ToolState).
+std::optional<ScanList>& GetScanList() {
+    static std::optional<ScanList> list;
+    return list;
+}
+std::mutex scan_mutex;
+
+ScanType ParseScanType(const std::string& name) {
+    static constexpr std::array<std::pair<std::string_view, ScanType>, 6> types{{
+        {"u8", ScanType::U8}, {"u16", ScanType::U16}, {"u32", ScanType::U32},
+        {"i32", ScanType::I32}, {"f32", ScanType::F32}, {"f64", ScanType::F64}}};
+    const auto it = std::ranges::find(types, std::string_view{name},
+                                      &std::pair<std::string_view, ScanType>::first);
+    if (it == types.end()) {
+        throw std::runtime_error{fmt::format("type \"{}\": want u8, u16, u32, i32, f32 or f64", name)};
+    }
+    return it->second;
+}
+
+std::string_view ScanTypeName(ScanType type) {
+    static constexpr std::array<std::string_view, 6> names{"u8", "u16", "u32", "i32", "f32", "f64"};
+    return names[static_cast<size_t>(type)];
+}
+
+/// A value of type as JSON: a number, or "nan", "inf" or "-inf".
+json ScanJson(ScanType type, u64 bits) {
+    const double value = ScanValue(type, bits);
+    if (std::isnan(value)) {
+        return "nan";
+    }
+    if (std::isinf(value)) {
+        return value < 0 ? "-inf" : "inf";
+    }
+    return value;
+}
+
+/// The test of a first scan or refine: {op?, value?, min?, max?}. A value of an integer type must
+/// be whole; an f32 value is rounded to f32, so equal matches the stored float exactly.
+ScanTest ParseScanTest(const json& params, ScanType type, bool first) {
+    const std::string op = params.value("op", std::string{params.contains("value") ? "equal" : "range"});
+    const auto number = [&](const char* key) {
+        const json& value = params.at(key);
+        if (!value.is_number()) {
+            throw std::runtime_error{fmt::format("{} must be a number", key)};
+        }
+        const double number = value.get<double>();
+        if (type != ScanType::F32 && type != ScanType::F64 && number != std::floor(number)) {
+            throw std::runtime_error{fmt::format("{} must be whole for {}", key, ScanTypeName(type))};
+        }
+        return type == ScanType::F32 ? static_cast<double>(static_cast<float>(number)) : number;
+    };
+    if (op == "equal") {
+        const double value = number("value");
+        return {.op = ScanOp::Equal, .low = value, .high = value};
+    }
+    if (op == "range") {
+        const ScanTest test{.op = ScanOp::Range, .low = number("min"), .high = number("max")};
+        if (test.low > test.high) {
+            throw std::runtime_error{"min must not exceed max"};
+        }
+        return test;
+    }
+    static constexpr std::array<std::pair<std::string_view, ScanOp>, 4> refines{{
+        {"changed", ScanOp::Changed}, {"unchanged", ScanOp::Unchanged},
+        {"increased", ScanOp::Increased}, {"decreased", ScanOp::Decreased}}};
+    const auto it = std::ranges::find(refines, std::string_view{op},
+                                      &std::pair<std::string_view, ScanOp>::first);
+    if (it == refines.end() || first) {
+        throw std::runtime_error{fmt::format(
+            "op \"{}\": a first scan wants equal or range; a refine also changed, unchanged, "
+            "increased or decreased", op)};
+    }
+    return {.op = it->second};
+}
+
+/// The [start, end) ranges of the game's writable memory: heap (state Normal) and data (the
+/// modules' .data and .bss: CodeData and AliasCodeData), as the kernel's memory blocks say.
+std::vector<std::pair<u64, u64>> ScanRegions(Kernel::KProcess& process, std::string_view regions) {
+    const bool heap = regions == "heap" || regions == "both";
+    const bool data = regions == "data" || regions == "both";
+    if (!heap && !data) {
+        throw std::runtime_error{fmt::format("regions \"{}\": want heap, data or both", regions)};
+    }
+    auto& table = process.GetPageTable();
+    std::vector<std::pair<u64, u64>> ranges;
+    const u64 end = GetInteger(table.GetAddressSpaceStart()) + table.GetAddressSpaceSize();
+    for (u64 address = GetInteger(table.GetAddressSpaceStart()); address < end;) {
+        Kernel::KMemoryInfo info{};
+        Kernel::Svc::PageInfo page{};
+        if (table.QueryInfo(&info, &page, address).IsError()) {
+            break;
+        }
+        const auto svc = info.GetSvcMemoryInfo();
+        const bool writable = True(svc.permission & Kernel::Svc::MemoryPermission::Write);
+        const bool wanted = (heap && svc.state == Kernel::Svc::MemoryState::Normal) ||
+                            (data && (svc.state == Kernel::Svc::MemoryState::CodeData ||
+                                      svc.state == Kernel::Svc::MemoryState::AliasCodeData));
+        if (writable && wanted) {
+            if (!ranges.empty() && ranges.back().second == svc.base_address) {
+                ranges.back().second += svc.size;
+            } else {
+                ranges.emplace_back(svc.base_address, svc.base_address + svc.size);
+            }
+        }
+        if (svc.base_address + svc.size <= address) {
+            break;
+        }
+        address = svc.base_address + svc.size;
+    }
+    return ranges;
+}
+
+json ScanSummary(const ScanList& list) {
+    return {{"type", ScanTypeName(list.type)}, {"count", list.addresses.size()},
+            {"truncated", list.truncated}, {"complete", list.complete},
+            {"max_hits", MAX_SCAN_HITS}};
+}
+
+/// {action: "first", type, value | min+max, regions?, op?}, {action: "refine", op, value?, min?,
+/// max?}, {action: "list", limit?, offset?}, {action: "drop"}. A cheat-engine style search: the
+/// first scan keeps its hits (at most MAX_SCAN_HITS), each refine keeps those that pass.
+json ScanMemory(ToolState& state, const json& params) {
+    const std::string action = params.value("action", std::string{});
+    if (action != "first" && action != "refine" && action != "list" && action != "drop") {
+        throw std::runtime_error{"action must be first, refine, list or drop"};
+    }
+    std::scoped_lock lock{scan_mutex};
+    std::optional<ScanList>& list = GetScanList();
+    if (action == "drop") {
+        const size_t count = list ? list->addresses.size() : 0;
+        list.reset();
+        return {{"dropped", count}};
+    }
+    if (action == "first") {
+        const ScanType type = ParseScanType(params.at("type").get<std::string>());
+        const ScanTest test = ParseScanTest(params, type, true);
+        Kernel::KProcess& process = Application(state);
+        const std::string regions = params.value("regions", std::string{"both"});
+        const auto ranges = ScanRegions(process, regions);
+        const int budget = Param<int>(params, "budget_ms", 30000, 100, 60000);
+        const auto begin = std::chrono::steady_clock::now();
+        list.reset();
+        list = ScanGuestMemory(process.GetMemory(), ranges, type, test, MAX_SCAN_HITS,
+                               begin + std::chrono::milliseconds{budget});
+        json covered = json::array();
+        u64 bytes = 0;
+        for (const auto& [start, end] : ranges) {
+            covered.push_back({{"start", HexAddress(start)}, {"end", HexAddress(end)}});
+            bytes += end - start;
+        }
+        json result = ScanSummary(*list);
+        result.update({{"regions", regions}, {"ranges", std::move(covered)}, {"region_bytes", bytes},
+                       {"scanned_bytes", list->scanned},
+                       {"elapsed_ms", std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - begin)
+                                          .count()}});
+        return result;
+    }
+    if (!list) {
+        throw std::runtime_error{"no scan list: start with action first"};
+    }
+    if (action == "refine") {
+        if (!params.contains("op")) {
+            throw std::runtime_error{"refine needs op"};
+        }
+        const ScanTest test = ParseScanTest(params, list->type, false);
+        const size_t before = list->addresses.size();
+        RefineScan(Application(state).GetMemory(), *list, test);
+        json result = ScanSummary(*list);
+        result["before"] = before;
+        return result;
+    }
+    // action "list": the kept hits from offset on, with their value now.
+    const size_t offset = Param<size_t>(params, "offset", 0, 0, list->addresses.size());
+    const size_t limit = Param<size_t>(params, "limit", 100, 1, MAX_SCAN_LIST);
+    auto& memory = Application(state).GetMemory();
+    const size_t size = ScanSize(list->type);
+    json hits = json::array();
+    for (size_t i = offset; i < (std::min)(offset + limit, list->addresses.size()); ++i) {
+        std::array<u8, 8> now{};
+        json entry = {{"address", HexAddress(list->addresses[i])},
+                      {"kept", ScanJson(list->type, list->values[i])}};
+        if (!ReadGuestMemory(memory, list->addresses[i], std::span{now.data(), size})) {
+            u64 bits = 0;
+            std::memcpy(&bits, now.data(), size);
+            entry["now"] = ScanJson(list->type, bits);
+        }
+        hits.push_back(std::move(entry));
+    }
+    json result = ScanSummary(*list);
+    result.update({{"offset", offset}, {"hits", std::move(hits)}});
     return result;
 }
 
@@ -2012,7 +2210,7 @@ json Features(ToolState&, const json&) {
                    {"input_ms", "measure", "input_record", "record_mode", "start_present",
                     "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                     "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                    "pre_roll", "capture_frames"}},
+                    "pre_roll", "capture_frames", "scan_memory"}},
                   {"kit", 2},
                   {"kit_hooks", true}};
     }
@@ -2049,6 +2247,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"host_timing", handler(HostTiming)},
         {"read_memory", handler(ReadMemory)},
         {"search_memory", handler(SearchMemory)},
+        {"scan_memory", handler(ScanMemory)},
         {"read_gpu_memory", handler(ReadGpuMemory)},
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},
@@ -2234,6 +2433,115 @@ GuestSearch SearchGuestMemory(Memory::Memory& memory, std::span<const u8> patter
         address = page_end;
     }
     return search;
+}
+
+size_t ScanSize(ScanType type) {
+    static constexpr std::array<size_t, 6> sizes{1, 2, 4, 4, 4, 8};
+    return sizes[static_cast<size_t>(type)];
+}
+
+double ScanValue(ScanType type, u64 bits) {
+    switch (type) {
+    case ScanType::U8:
+        return static_cast<double>(static_cast<u8>(bits));
+    case ScanType::U16:
+        return static_cast<double>(static_cast<u16>(bits));
+    case ScanType::U32:
+        return static_cast<double>(static_cast<u32>(bits));
+    case ScanType::I32:
+        return static_cast<double>(static_cast<s32>(static_cast<u32>(bits)));
+    case ScanType::F32:
+        return static_cast<double>(std::bit_cast<float>(static_cast<u32>(bits)));
+    case ScanType::F64:
+        return std::bit_cast<double>(bits);
+    }
+    return 0.0;
+}
+
+namespace {
+
+/// Whether a value passes test; kept is the value at the last scan (refines only).
+bool PassesScan(ScanType type, ScanTest test, u64 bits, u64 kept) {
+    switch (test.op) {
+    case ScanOp::Changed:
+        return bits != kept;
+    case ScanOp::Unchanged:
+        return bits == kept;
+    default:
+        break;
+    }
+    const double value = ScanValue(type, bits);
+    switch (test.op) {
+    case ScanOp::Equal:
+    case ScanOp::Range:
+        return value >= test.low && value <= test.high;
+    case ScanOp::Increased:
+        return value > ScanValue(type, kept);
+    case ScanOp::Decreased:
+        return value < ScanValue(type, kept);
+    default:
+        return false;
+    }
+}
+
+} // Anonymous namespace
+
+ScanList ScanGuestMemory(Memory::Memory& memory, std::span<const std::pair<u64, u64>> ranges,
+                         ScanType type, ScanTest test, size_t max_hits,
+                         std::chrono::steady_clock::time_point deadline) {
+    ScanList list{.type = type, .addresses = {}, .values = {}};
+    const size_t size = ScanSize(type);
+    for (const auto& [range_start, range_end] : ranges) {
+        // Aligned to the size, so a value never spans two pages.
+        for (u64 page = range_start & ~u64{Memory::LICHII_PAGEMASK}; page < range_end;
+             page += Memory::LICHII_PAGESIZE) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                list.complete = false;
+                return list;
+            }
+            const u8* const source = GuestByte(memory, page);
+            if (source == nullptr) {
+                continue;
+            }
+            const u64 first = (std::max)(page, (range_start + size - 1) & ~u64{size - 1});
+            const u64 last = (std::min)(page + Memory::LICHII_PAGESIZE, range_end);
+            for (u64 address = first; address + size <= last; address += size) {
+                u64 bits = 0;
+                std::memcpy(&bits, source + (address - page), size);
+                if (!PassesScan(type, test, bits, 0)) {
+                    continue;
+                }
+                if (list.addresses.size() == max_hits) {
+                    list.truncated = true;
+                    return list;
+                }
+                list.addresses.push_back(address);
+                list.values.push_back(bits);
+            }
+            list.scanned += last - (std::max)(page, range_start);
+        }
+    }
+    return list;
+}
+
+void RefineScan(Memory::Memory& memory, ScanList& list, ScanTest test) {
+    const size_t size = ScanSize(list.type);
+    size_t kept = 0;
+    for (size_t i = 0; i < list.addresses.size(); ++i) {
+        const u8* const source = GuestByte(memory, list.addresses[i]);
+        if (source == nullptr) {
+            continue;
+        }
+        u64 bits = 0;
+        std::memcpy(&bits, source, size);
+        if (PassesScan(list.type, test, bits, list.values[i])) {
+            list.addresses[kept] = list.addresses[i];
+            list.values[kept] = bits;
+            ++kept;
+        }
+    }
+    list.addresses.resize(kept);
+    list.values.resize(kept);
 }
 
 InputStep ParseInputStep(const json& step) {
@@ -2483,6 +2791,10 @@ Service::~Service() {
     server.reset();
     StopRecording();
     StopStepTrace();
+    {
+        std::scoped_lock lock{scan_mutex};
+        GetScanList().reset();
+    }
     GetWatchdog().Stop();
 }
 

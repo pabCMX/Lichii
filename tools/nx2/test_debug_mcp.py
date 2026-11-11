@@ -106,7 +106,7 @@ class AdapterTest(unittest.TestCase):
                  ["result"]["tools"]]
         self.assertEqual(names, ["status", "frame_times", "screenshot", "log_tail", "log_filter", "capture_frame",
                                  "capture_image", "capture_bundle", "reject_shaders", "sample", "read_memory",
-                                 "search_memory", "read_gpu_memory", "input",
+                                 "search_memory", "scan_memory", "read_gpu_memory", "input",
                                  "input_sequence", "input_record", "record_anchor", "features", "luma_watch",
                                  "host_timing", "trace_record",
                                  "trace_stop", "trace_status"])
@@ -160,6 +160,7 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(debug_mcp.default_timeout("input_sequence", dict(sequence, pre_roll=[{"frames": 600}])), 70)
         self.assertEqual(debug_mcp.default_timeout("input_sequence", dict(sequence, capture_frames=[5])), 46)
         self.assertEqual(debug_mcp.default_timeout("status", {}), 5)
+        self.assertEqual(debug_mcp.default_timeout("scan_memory", {"action": "first"}), 40)
         result = self.call("input_sequence", sequence)
         self.assertFalse(result["isError"])
         self.assertEqual(self.fake.requests[-1]["params"], sequence)
