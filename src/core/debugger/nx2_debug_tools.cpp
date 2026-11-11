@@ -1546,10 +1546,6 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         {"elapsed_s",
          std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()},
     };
-    if (captures) {
-        result["capture_dir"] = captures->Directory();
-        result["captures"] = captures->Finish(state, 5s);
-    }
     if (GetWatchSlot().Active()) {
         if (const auto watched_values = GetWatchSlot().Finish()) {
             result["watch"] = watched_values->Json();
@@ -1591,6 +1587,12 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
                 static_cast<double>(ns(timed_end) - (std::min)(last_ns, ns(timed_end))) /
                 1'000'000.0;
         }
+    }
+    // After the measurement: the wait for the files (up to 5 s) would let new presents overwrite
+    // the start of a long clip in the present-time ring.
+    if (captures) {
+        result["capture_dir"] = captures->Directory();
+        result["captures"] = captures->Finish(state, 5s);
     }
     return result;
 }
