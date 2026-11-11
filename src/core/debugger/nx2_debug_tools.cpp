@@ -1280,7 +1280,7 @@ public:
                     done->set_value("");
                 }
             },
-            layout, Service::Nvnflinger::LayerStackId::Default, shot.target);
+            layout, ::Service::Nvnflinger::LayerStackId::Default, shot.target);
         pending = next++;
     }
 
