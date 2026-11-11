@@ -65,6 +65,7 @@ class QSlider;
 class QHBoxLayout;
 class WaitTreeWidget;
 class PerformanceOverlay;
+class TrainerOverlay;
 #ifdef HAS_RESHADE
 class ConfigurePostProcessing;
 #endif
@@ -429,6 +430,9 @@ private slots:
     void OnToggleFilterBar();
     void OnToggleStatusBar();
     void OnTogglePerfOverlay();
+    /// The "Toggle Trainer Overlay" hotkey: shows or hides the input display over the game. Off
+    /// at start and not saved.
+    void OnToggleTrainerOverlay();
 #ifdef HAS_RESHADE
     void OnPostProcessingShaders();
 #endif
@@ -570,6 +574,7 @@ private:
     OverlayDialog* shutdown_dialog{};
     BugReportDialog* bug_report_dialog{};
     PerformanceOverlay* perf_overlay = nullptr;
+    TrainerOverlay* trainer_overlay = nullptr; ///< made at the first toggle
 #ifdef HAS_RESHADE
     ConfigurePostProcessing* post_processing_dialog = nullptr;
 #endif

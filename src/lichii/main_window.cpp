@@ -20,6 +20,7 @@
 #include "common/shutdown_progress.h"
 #include "frontend_common/settings_generator.h"
 #include "render/performance_overlay.h"
+#include "render/trainer_overlay.h"
 #ifdef HAS_RESHADE
 #include "configuration/configure_post_processing.h"
 #include "video_core/post_processing/fx_preset.h"
@@ -1508,6 +1509,7 @@ void MainWindow::InitializeHotkeys() {
 
     connect_shortcut(QStringLiteral("Record Input (Per Present)"),
                      &MainWindow::OnPresentRecordToggle);
+    connect_shortcut(QStringLiteral("Toggle Trainer Overlay"), &MainWindow::OnToggleTrainerOverlay);
     connect_shortcut(QStringLiteral("Toggle Renderdoc Capture"), [] {
         if (Settings::values.enable_renderdoc_hotkey) {
             QtCommon::system->GetRenderdocAPI().ToggleCapture();
@@ -4627,6 +4629,21 @@ void MainWindow::OnToggleStatusBar() {
 void MainWindow::OnTogglePerfOverlay() {
     if (perf_overlay)
         perf_overlay->setVisible(ui->action_Show_Performance_Overlay->isChecked());
+}
+
+void MainWindow::OnToggleTrainerOverlay() {
+    if (!trainer_overlay) {
+        // Hidden with no game, and in exclusive fullscreen, where a window cannot show over the
+        // game's swapchain.
+        trainer_overlay = new TrainerOverlay(this, render_window, *QtCommon::system, [this] {
+            return !emulation_running ||
+                   (ui->action_Fullscreen->isChecked() && UsingExclusiveFullscreen());
+        });
+    }
+    trainer_overlay->SetWanted(!trainer_overlay->Wanted());
+    if (trainer_overlay->Wanted() && !emulation_running) {
+        ShowStatusMessage(tr("Trainer overlay on: it shows when a game runs"), 4000);
+    }
 }
 
 #ifdef HAS_RESHADE
