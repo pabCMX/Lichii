@@ -37,8 +37,18 @@ QFont Font(double pixels, bool bold) {
     return font;
 }
 
-/// A button as a shape that lights while held, with its label inside.
-void Button(QPainter& painter, const QRectF& rect, bool held, const QString& label, bool round) {
+/// Which layer a paint call draws: the base has everything that never changes (the panel and the
+/// idle shapes), the live layer what the input changes. The overlay caches the base as an image.
+enum class Layer { Base, Live };
+
+/// A button as a shape that lights while held, with its label inside: idle in the base layer,
+/// lit over it in the live layer.
+void Button(QPainter& painter, Layer layer, const QRectF& rect, bool held, const QString& label,
+            bool round) {
+    if (layer == Layer::Live && !held) {
+        return;
+    }
+    held = layer == Layer::Live;
     painter.setPen(QPen{held ? LIT : IDLE_EDGE, 1.2});
     painter.setBrush(held ? LIT : IDLE_FILL);
     if (round) {
@@ -52,9 +62,9 @@ void Button(QPainter& painter, const QRectF& rect, bool held, const QString& lab
     }
 }
 
-void RoundButton(QPainter& painter, QPointF centre, bool held, const QString& label) {
+void RoundButton(QPainter& painter, Layer layer, QPointF centre, bool held, const QString& label) {
     constexpr double r = 9.0;
-    Button(painter, QRectF{centre.x() - r, centre.y() - r, 2 * r, 2 * r}, held, label, true);
+    Button(painter, layer, QRectF{centre.x() - r, centre.y() - r, 2 * r, 2 * r}, held, label, true);
 }
 
 QPointF StickPoint(QPointF centre, s32 x, s32 y) {
@@ -64,14 +74,22 @@ QPointF StickPoint(QPointF centre, s32 x, s32 y) {
 
 /// A stick as a dot in a circle, with the trail of its last positions; the circle lights while
 /// the stick is clicked.
-void Stick(QPainter& painter, QPointF centre, s32 x, s32 y, const StickTrail* trail, s64 now_ms,
-           bool clicked) {
-    painter.setPen(QPen{clicked ? LIT : IDLE_EDGE, clicked ? 3.0 : 1.2});
-    painter.setBrush(clicked ? QColor{255, 202, 40, 60} : QColor{0, 0, 0, 70});
-    painter.drawEllipse(centre, STICK_RADIUS, STICK_RADIUS);
-    painter.setPen(QPen{QColor{255, 255, 255, 45}, 1.0});
-    painter.drawLine(centre - QPointF{STICK_RADIUS, 0}, centre + QPointF{STICK_RADIUS, 0});
-    painter.drawLine(centre - QPointF{0, STICK_RADIUS}, centre + QPointF{0, STICK_RADIUS});
+void Stick(QPainter& painter, Layer layer, QPointF centre, s32 x, s32 y, const StickTrail* trail,
+           s64 now_ms, bool clicked) {
+    if (layer == Layer::Base) {
+        painter.setPen(QPen{IDLE_EDGE, 1.2});
+        painter.setBrush(QColor{0, 0, 0, 70});
+        painter.drawEllipse(centre, STICK_RADIUS, STICK_RADIUS);
+        painter.setPen(QPen{QColor{255, 255, 255, 45}, 1.0});
+        painter.drawLine(centre - QPointF{STICK_RADIUS, 0}, centre + QPointF{STICK_RADIUS, 0});
+        painter.drawLine(centre - QPointF{0, STICK_RADIUS}, centre + QPointF{0, STICK_RADIUS});
+        return;
+    }
+    if (clicked) {
+        painter.setPen(QPen{LIT, 3.0});
+        painter.setBrush(QColor{255, 202, 40, 60});
+        painter.drawEllipse(centre, STICK_RADIUS, STICK_RADIUS);
+    }
 
     // Older segments fade out.
     if (trail != nullptr) {
@@ -138,56 +156,84 @@ QRect PanelRect(const QRect& image) {
         .toRect();
 }
 
-void PaintInputPanel(QPainter& painter, const InputFrame& frame) {
+namespace {
+
+void Paint(QPainter& painter, Layer layer, const InputFrame& frame) {
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::TextAntialiasing);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(PANEL);
-    painter.drawRoundedRect(QRectF{QPointF{}, INPUT_PANEL_SIZE}, 10.0, 10.0);
-
-    StateMarks(painter, frame);
+    const bool live = layer == Layer::Live;
+    if (live) {
+        StateMarks(painter, frame);
+    } else {
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(PANEL);
+        painter.drawRoundedRect(QRectF{QPointF{}, INPUT_PANEL_SIZE}, 10.0, 10.0);
+    }
 
     // Shoulders, and the Joy-Con side buttons when held sideways.
     painter.setFont(Font(11, true));
-    Button(painter, {8, 30, 40, 16}, Held(frame, NpadButton::ZL), QStringLiteral("ZL"), false);
-    Button(painter, {52, 30, 40, 16}, Held(frame, NpadButton::L), QStringLiteral("L"), false);
-    Button(painter, {140, 30, 28, 16}, Held(frame, NpadButton::LeftSL | NpadButton::RightSL),
+    Button(painter, layer, {8, 30, 40, 16}, Held(frame, NpadButton::ZL), QStringLiteral("ZL"),
+           false);
+    Button(painter, layer, {52, 30, 40, 16}, Held(frame, NpadButton::L), QStringLiteral("L"),
+           false);
+    Button(painter, layer, {140, 30, 28, 16}, Held(frame, NpadButton::LeftSL | NpadButton::RightSL),
            QStringLiteral("SL"), false);
-    Button(painter, {176, 30, 28, 16}, Held(frame, NpadButton::LeftSR | NpadButton::RightSR),
+    Button(painter, layer, {176, 30, 28, 16}, Held(frame, NpadButton::LeftSR | NpadButton::RightSR),
            QStringLiteral("SR"), false);
-    Button(painter, {252, 30, 40, 16}, Held(frame, NpadButton::R), QStringLiteral("R"), false);
-    Button(painter, {296, 30, 40, 16}, Held(frame, NpadButton::ZR), QStringLiteral("ZR"), false);
+    Button(painter, layer, {252, 30, 40, 16}, Held(frame, NpadButton::R), QStringLiteral("R"),
+           false);
+    Button(painter, layer, {296, 30, 40, 16}, Held(frame, NpadButton::ZR), QStringLiteral("ZR"),
+           false);
 
     painter.setFont(Font(12, true));
-    RoundButton(painter, {154, 70}, Held(frame, NpadButton::Minus), QStringLiteral("−"));
-    RoundButton(painter, {190, 70}, Held(frame, NpadButton::Plus), QStringLiteral("+"));
+    RoundButton(painter, layer, {154, 70}, Held(frame, NpadButton::Minus), QStringLiteral("−"));
+    RoundButton(painter, layer, {190, 70}, Held(frame, NpadButton::Plus), QStringLiteral("+"));
 
     // Face buttons in the Switch diamond: X top, A right, B bottom, Y left.
     painter.setFont(Font(11, true));
-    RoundButton(painter, {300, 66}, Held(frame, NpadButton::X), QStringLiteral("X"));
-    RoundButton(painter, {318, 84}, Held(frame, NpadButton::A), QStringLiteral("A"));
-    RoundButton(painter, {300, 102}, Held(frame, NpadButton::B), QStringLiteral("B"));
-    RoundButton(painter, {282, 84}, Held(frame, NpadButton::Y), QStringLiteral("Y"));
+    RoundButton(painter, layer, {300, 66}, Held(frame, NpadButton::X), QStringLiteral("X"));
+    RoundButton(painter, layer, {318, 84}, Held(frame, NpadButton::A), QStringLiteral("A"));
+    RoundButton(painter, layer, {300, 102}, Held(frame, NpadButton::B), QStringLiteral("B"));
+    RoundButton(painter, layer, {282, 84}, Held(frame, NpadButton::Y), QStringLiteral("Y"));
 
     // D-pad.
     const QPointF pad{120, 136};
     const auto arm = [&](QPointF offset, NpadButton button) {
-        Button(painter, QRectF{pad + offset - QPointF{7, 7}, QSizeF{14, 14}}, Held(frame, button),
-               QString{}, false);
+        Button(painter, layer, QRectF{pad + offset - QPointF{7, 7}, QSizeF{14, 14}},
+               Held(frame, button), QString{}, false);
     };
     arm({0, -15}, NpadButton::Up);
     arm({15, 0}, NpadButton::Right);
     arm({0, 15}, NpadButton::Down);
     arm({-15, 0}, NpadButton::Left);
 
-    Stick(painter, {44, 84}, frame.left_x, frame.left_y, frame.left_trail, frame.now_ms,
+    Stick(painter, layer, {44, 84}, frame.left_x, frame.left_y, frame.left_trail, frame.now_ms,
           Held(frame, NpadButton::StickL));
-    StickText(painter, {76, 66}, frame.left_x, frame.left_y);
-    Stick(painter, {240, 136}, frame.right_x, frame.right_y, frame.right_trail, frame.now_ms,
+    if (live) {
+        StickText(painter, {76, 66}, frame.left_x, frame.left_y);
+    }
+    Stick(painter, layer, {240, 136}, frame.right_x, frame.right_y, frame.right_trail, frame.now_ms,
           Held(frame, NpadButton::StickR));
-    StickText(painter, {272, 118}, frame.right_x, frame.right_y);
+    if (live) {
+        StickText(painter, {272, 118}, frame.right_x, frame.right_y);
+    }
     painter.restore();
+}
+
+} // Anonymous namespace
+
+void PaintInputBase(QPainter& painter) {
+    Paint(painter, Layer::Base, InputFrame{});
+}
+
+void PaintInputLive(QPainter& painter, const InputFrame& frame) {
+    Paint(painter, Layer::Live, frame);
+}
+
+void PaintInputPanel(QPainter& painter, const InputFrame& frame) {
+    PaintInputBase(painter);
+    PaintInputLive(painter, frame);
 }
 
 } // namespace TrainerHud

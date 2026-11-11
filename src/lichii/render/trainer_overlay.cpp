@@ -159,8 +159,23 @@ void TrainerOverlay::ReadInput() {
 }
 
 void TrainerOverlay::paintEvent(QPaintEvent*) {
+    const qreal ratio = devicePixelRatioF();
+    const QSize pixels = (QSizeF{size()} * ratio).toSize();
+    const QPointF scale{width() / TrainerHud::INPUT_PANEL_SIZE.width(),
+                        height() / TrainerHud::INPUT_PANEL_SIZE.height()};
+    // The idle panel costs most of a paint (antialiased fills), so it is drawn once per size.
+    if (base.size() != pixels) {
+        base = QImage{pixels, QImage::Format_ARGB32_Premultiplied};
+        base.setDevicePixelRatio(ratio);
+        base.fill(Qt::transparent);
+        QPainter base_painter{&base};
+        base_painter.scale(scale.x(), scale.y());
+        TrainerHud::PaintInputBase(base_painter);
+    }
     QPainter painter{this};
-    painter.scale(width() / TrainerHud::INPUT_PANEL_SIZE.width(),
-                  height() / TrainerHud::INPUT_PANEL_SIZE.height());
-    TrainerHud::PaintInputPanel(painter, frame);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.drawImage(QPointF{}, base);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    painter.scale(scale.x(), scale.y());
+    TrainerHud::PaintInputLive(painter, frame);
 }

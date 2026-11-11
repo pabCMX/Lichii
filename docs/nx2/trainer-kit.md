@@ -293,6 +293,31 @@ it is destroyed:
   on the GUI thread would deadlock.
 - eden-cli: calls `System::Run` and `System::Pause`.
 
+## Trainer overlay
+
+Ctrl+F12 ("Toggle Trainer Overlay" in the hotkey settings) shows or hides an input display over
+the bottom-left of the game image. It is off at start and the state is not saved.
+
+- It shows every npad button the game reads (A B X Y, L R ZL ZR, Plus, Minus, the D-pad, the stick
+  clicks, SL and SR), both sticks as a dot in a circle with a 0.5 s trail, and per stick the angle
+  and magnitude. The angle is in compass degrees: 0 is up (the stick pushed forward), turning
+  clockwise, so 90 is right. `---` means centred. The magnitude is the length over a full
+  deflection, after the deadzone and range settings; only square corners pass 1.00.
+- `REC n` while `input_record` records (Ctrl+F8 or a client), with the presents recorded so far.
+  `REPLAY` while an `input` or `input_sequence` call holds input.
+- Data: `Nx2Debug::ReadGamePad`, the getters the npad updater and `input_record` read, so a replay
+  shows too. It is read on a 60 Hz GUI timer that runs only while the overlay is on. The present
+  path does no work for it. The trail takes one point per present.
+- Cost while on: the read, and a repaint only when the input changes or a trail fades. The idle
+  panel is cached as an image; a repaint measured 0.33 ms at 720p and 1.3 ms at 4K (devbox Xeon,
+  both sticks moving). During a replay each read runs the replay's step lookup under the injector
+  mutex, a few microseconds.
+- It is a separate click-through tool window (`Qt::WindowTransparentForInput`, no focus, no
+  activation), owned by the window that shows the game. It hides with no game, while that window
+  is minimised, and in exclusive fullscreen. Debug-server screenshots read the game's frame, so
+  they never contain it. On Wayland the compositor places it.
+- `tools/nx2/trainer_hud_preview.cpp` renders the panel to PNG without a display.
+
 ## Live switches
 
 `Common::Nx2Live::Switch` (`src/common/nx2_live_switch.h`). The environment gives the start value at static initialization; `VideoCore::CreateGPU` reads it
