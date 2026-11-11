@@ -290,9 +290,6 @@ TEST_CASE("time_control checks its mode and value and needs the patch", "[nx2_tr
     REQUIRE_THROWS_WITH(call({{"trace", -1}}), ContainsSubstring("trace is the presents to trace, a whole number, 1 to 36000"));
     REQUIRE_THROWS_WITH(call({{"trace", 36001}}), ContainsSubstring("1 to 36000"));
     REQUIRE_THROWS_WITH(call({{"trace", 2.5}}), ContainsSubstring("or 0 to stop"));
-    // The first Publish takes what an earlier Apply in this process left pending, the second clears.
-    FileSys::OotTimeControl::Publish("main", 0);
-    FileSys::OotTimeControl::Publish("main", 0);
     REQUIRE_THROWS_WITH(call({{"mode", "scale"}, {"value", 0.5}}),
                         ContainsSubstring("EDEN_NX2_OOT_TIME_CONTROL=1"));
     REQUIRE_THROWS_WITH(call(json::object()), ContainsSubstring("not installed"));

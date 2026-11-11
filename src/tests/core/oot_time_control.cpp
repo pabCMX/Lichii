@@ -11,6 +11,8 @@
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
 #include "common/common_funcs.h"
 #include "core/core.h"
 #include "core/debugger/nx2_debug_tools.h"
@@ -22,6 +24,17 @@
 namespace {
 
 namespace TC = FileSys::OotTimeControl;
+
+/// Tests run in random order: after every test case, forget what Apply and Publish left, as a
+/// System shutdown does, so no other test sees a time control block.
+class TimeControlReset : public Catch::EventListenerBase {
+public:
+    using Catch::EventListenerBase::EventListenerBase;
+    void testCaseEnded(const Catch::TestCaseStats&) override {
+        TC::Reset();
+    }
+};
+CATCH_REGISTER_LISTENER(TimeControlReset)
 
 constexpr size_t Header = sizeof(Loader::NSOHeader);
 constexpr u32 Original = 0x1E201828;  // fdiv s8, s1, s0
@@ -237,9 +250,6 @@ TEST_CASE("features gives the control block address only while time control is i
     const auto features = [&] {
         return Core::Nx2Debug::CallTool(system, "features", nlohmann::json::object());
     };
-    // Two Publish calls clear whatever an earlier Apply in this process left pending.
-    TC::Publish("main", 0);
-    TC::Publish("main", 0);
     REQUIRE_FALSE(features().contains("time_control_block"));
     const auto nso = MakeMain();
     auto out = nso;
