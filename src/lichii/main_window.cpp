@@ -3779,6 +3779,9 @@ void MainWindow::OnLoadComplete() {
 
     connect(perf_overlay, &PerformanceOverlay::closed, perf_overlay,
             [this]() { ui->action_Show_Performance_Overlay->setChecked(false); });
+    if (trainer_overlay) {
+        trainer_overlay->Refresh();
+    }
 }
 
 void MainWindow::OnExecuteProgram(std::size_t program_index) {

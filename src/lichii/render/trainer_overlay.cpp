@@ -3,6 +3,7 @@
 
 #include <chrono>
 
+#include <QEvent>
 #include <QPainter>
 
 #include "core/debugger/nx2_debug_tools.h"
@@ -57,6 +58,24 @@ TrainerOverlay::TrainerOverlay(QWidget* parent, GRenderWindow* game_view_, Core:
     frame.right_trail = &right_trail;
     timer.setInterval(16);
     connect(&timer, &QTimer::timeout, this, &TrainerOverlay::Tick);
+    game_view->installEventFilter(this);
+}
+
+void TrainerOverlay::Refresh() {
+    if (wanted && !timer.isActive()) {
+        timer.start();
+        Tick();
+    }
+}
+
+bool TrainerOverlay::eventFilter(QObject*, QEvent* event) {
+    const auto type = event->type();
+    if (wanted &&
+        (type == QEvent::Show || type == QEvent::Hide || type == QEvent::WindowStateChange)) {
+        // Queued: Place may reparent this window, which must not happen inside the event.
+        QTimer::singleShot(0, this, &TrainerOverlay::Refresh);
+    }
+    return false;
 }
 
 void TrainerOverlay::SetWanted(bool wanted_) {
@@ -68,13 +87,13 @@ void TrainerOverlay::SetWanted(bool wanted_) {
     }
     left_trail.Clear();
     right_trail.Clear();
-    timer.start();
-    Tick();
+    Refresh();
 }
 
 void TrainerOverlay::Tick() {
     if (!Place()) {
         hide();
+        timer.stop();
         return;
     }
     const TrainerHud::InputFrame before = frame;
@@ -88,13 +107,17 @@ void TrainerOverlay::Tick() {
 }
 
 bool TrainerOverlay::Place() {
-    if (hidden() || !game_view->isVisible()) {
-        return false;
-    }
     // Owned by the window that shows the game (the main window, or the render window in
     // separate-window mode), so it stays above that window and minimises with it.
     QWidget* const top = game_view->window();
-    if (top->isMinimized()) {
+    if (top != watched_top) {
+        if (watched_top != nullptr) {
+            watched_top->removeEventFilter(this);
+        }
+        watched_top = top;
+        watched_top->installEventFilter(this);
+    }
+    if (hidden() || !game_view->isVisible() || top->isMinimized()) {
         return false;
     }
     if (parentWidget() != top) {

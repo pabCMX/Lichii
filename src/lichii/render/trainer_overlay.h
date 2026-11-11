@@ -19,8 +19,8 @@ class GRenderWindow;
 /// The trainer overlay (docs/nx2/trainer-kit.md, "Trainer overlay"): a click-through window over
 /// the bottom-left of the game image with the input the game is given. MainWindow creates it on
 /// the first hotkey press and toggles it with SetWanted. It reads the pad on a 60 Hz GUI timer
-/// that runs only while it is wanted, and repaints only when what it shows changed. Later panels
-/// (frame-time bars) go above the input panel in this window.
+/// that runs only while it is wanted and can show, and repaints only when what it shows changed.
+/// Later panels (frame-time bars) go above the input panel in this window.
 class TrainerOverlay : public QWidget {
     Q_OBJECT
 
@@ -35,8 +35,13 @@ public:
         return wanted;
     }
 
+    /// Starts the timer again if the overlay is wanted and can show now. Called when a game has
+    /// loaded and on show, hide and window state events of the game's windows.
+    void Refresh();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void Tick();
@@ -48,6 +53,8 @@ private:
     Core::System& system;
     std::function<bool()> hidden;
     QTimer timer;
+    /// The top-level window whose events start the timer again.
+    QWidget* watched_top{};
     bool wanted{};
 
     TrainerHud::InputFrame frame{};

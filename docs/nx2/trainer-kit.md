@@ -306,7 +306,8 @@ the bottom-left of the game image. It is off at start and the state is not saved
 - `REC n` while `input_record` records (Ctrl+F8 or a client), with the presents recorded so far.
   `REPLAY` while an `input` or `input_sequence` call holds input.
 - Data: `Nx2Debug::ReadGamePad`, the getters the npad updater and `input_record` read, so a replay
-  shows too. It is read on a 60 Hz GUI timer that runs only while the overlay is on. The present
+  shows too. It is read on a 60 Hz GUI timer that runs only while the overlay is on and can
+  show. The present
   path does no work for it. The trail takes one point per present.
 - Cost while on: the read, and a repaint only when the input changes or a trail fades. The idle
   panel is cached as an image; a repaint measured 0.33 ms at 720p and 1.3 ms at 4K (devbox Xeon,
