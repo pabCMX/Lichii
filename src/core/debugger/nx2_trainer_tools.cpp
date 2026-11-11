@@ -539,7 +539,7 @@ json Notify(TrainerState&, const json& params, const ClientGone&) {
     // One status bar line.
     std::ranges::replace(text, '\n', ' ');
     std::ranges::replace(text, '\r', ' ');
-    const json ms_value = params.value("ms", json{5000});
+    const json ms_value = params.value("ms", json(5000));
     if (!ms_value.is_number_integer() || ms_value.get<s64>() < 1 ||
         ms_value.get<s64>() > MAX_NOTIFY_MS) {
         throw std::runtime_error{fmt::format("ms must be an integer of 1 to {}", MAX_NOTIFY_MS)};
