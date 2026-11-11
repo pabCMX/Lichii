@@ -399,7 +399,7 @@ TEST_CASE("Memory scans keep typed hits and refine them by their change",
     put(0x1010, 97.5f);   // 0x4010
     put(0x0020, 98.0f);   // 0x5020
     put(0x2030, 250.0f);  // 0x7030
-    put(0x1012, 95.0f);   // 0x4012: not aligned to 4, never a hit
+    put(0x1022, 95.0f);   // 0x4022: not aligned to 4, never a hit
     auto& memory = guest.process.GetMemory();
     const auto later = std::chrono::steady_clock::now() + 60s;
     const std::array whole{std::pair<u64, u64>{0x4000, 0x9000}};
@@ -418,11 +418,15 @@ TEST_CASE("Memory scans keep typed hits and refine them by their change",
     auto changed = list;
     Core::Nx2Debug::RefineScan(memory, changed, {.op = ScanOp::Changed});
     REQUIRE(changed.addresses == std::vector<u64>{0x4010, 0x7030});
-    auto up = changed;
+    // A refine keeps the values it read: the next one compares with them.
+    REQUIRE(Core::Nx2Debug::ScanValue(ScanType::F32, changed.values[0]) == 120.0);
+    auto again = changed;
+    Core::Nx2Debug::RefineScan(memory, again, {.op = ScanOp::Increased});
+    REQUIRE(again.addresses.empty());
+    auto up = list;
     Core::Nx2Debug::RefineScan(memory, up, {.op = ScanOp::Increased});
     REQUIRE(up.addresses == std::vector<u64>{0x4010});
-    REQUIRE(Core::Nx2Debug::ScanValue(ScanType::F32, up.values[0]) == 120.0);
-    auto down = changed;
+    auto down = list;
     Core::Nx2Debug::RefineScan(memory, down, {.op = ScanOp::Decreased});
     REQUIRE(down.addresses == std::vector<u64>{0x7030});
     auto same = list;
