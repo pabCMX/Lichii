@@ -1185,25 +1185,9 @@ ReplaySync& GetReplaySync() {
     return sync;
 }
 
-/// input_sequence watch while it runs: active is the one check the reply hook makes otherwise.
-struct PresentWatch {
-    std::atomic<bool> active{};
-    std::mutex mutex;
-    std::optional<ValueWatch> watch;
-};
-
-PresentWatch& GetPresentWatch() {
-    static PresentWatch watch;
-    return watch;
-}
-
-/// Reply hook part of a watch: reads the watched values at the present's reply.
-void WatchPresent(u64 present) {
-    PresentWatch& watch = GetPresentWatch();
-    KitLock lock{watch.mutex, "watch mutex", __func__};
-    if (watch.watch) {
-        watch.watch->Sample(present);
-    }
+WatchSlot& GetWatchSlot() {
+    static WatchSlot slot;
+    return slot;
 }
 
 /// watch: [{address, as}] for the frame-step call over presents [start, end).
@@ -1459,17 +1443,12 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         input_calls.fetch_sub(1, std::memory_order_relaxed);
     };
     if (!watched.empty()) {
-        PresentWatch& watch = GetPresentWatch();
-        KitLock lock{watch.mutex, "watch mutex", __func__};
-        watch.watch.emplace(Application(state).GetMemory(), std::move(watched), start, start + total);
-        watch.active.store(true, std::memory_order_release);
+        GetWatchSlot().Start(
+            ValueWatch{Application(state).GetMemory(), std::move(watched), start, start + total});
     }
     SCOPE_EXIT {
-        PresentWatch& watch = GetPresentWatch();
-        if (watch.active.load(std::memory_order_relaxed)) {
-            watch.active.store(false, std::memory_order_release);
-            KitLock lock{watch.mutex, "watch mutex", __func__};
-            watch.watch.reset();
+        if (GetWatchSlot().Active()) {
+            static_cast<void>(GetWatchSlot().Finish());
         }
     };
     if (!timed && kit_hooks) {
@@ -1571,9 +1550,10 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         result["capture_dir"] = captures->Directory();
         result["captures"] = captures->Finish(state, 5s);
     }
-    if (PresentWatch& watch = GetPresentWatch(); watch.active.load(std::memory_order_relaxed)) {
-        KitLock lock{watch.mutex, "watch mutex", __func__};
-        result["watch"] = watch.watch->Json();
+    if (GetWatchSlot().Active()) {
+        if (const auto watched_values = GetWatchSlot().Finish()) {
+            result["watch"] = watched_values->Json();
+        }
     }
     if (timed) {
         result["ms"] = total;
@@ -1951,8 +1931,8 @@ void PresentReply(u64 present) {
         in_forced_npad_update = false;
     }
     RecordPresentReply(present);
-    if (GetPresentWatch().active.load(std::memory_order_relaxed)) {
-        WatchPresent(present);
+    if (GetWatchSlot().Active()) {
+        GetWatchSlot().Sample(present);
     }
     if (const auto trace = reply_trace.load(std::memory_order_acquire)) {
         trace(present);
@@ -2641,6 +2621,27 @@ void ValueWatch::Sample(u64 present) {
         }
         values.push_back(source != nullptr ? std::optional{bits} : std::nullopt);
     }
+}
+
+void WatchSlot::Start(ValueWatch started) {
+    KitLock lock{mutex, "watch mutex", __func__};
+    watch.emplace(std::move(started));
+    active.store(true, std::memory_order_release);
+}
+
+void WatchSlot::Sample(u64 present) {
+    KitLock lock{mutex, "watch mutex", __func__};
+    if (watch) {
+        watch->Sample(present);
+    }
+}
+
+std::optional<ValueWatch> WatchSlot::Finish() {
+    active.store(false, std::memory_order_release);
+    KitLock lock{mutex, "watch mutex", __func__};
+    std::optional<ValueWatch> done = std::move(watch);
+    watch.reset();
+    return done;
 }
 
 json ValueWatch::Json() const {

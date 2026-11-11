@@ -7,6 +7,7 @@
 #include <chrono>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -152,6 +153,26 @@ private:
     u64 end;
     std::vector<u64> presents;
     std::vector<std::optional<u64>> values;
+};
+
+/// The watch of the input_sequence call running now, for the present reply hook. Active() is
+/// the one check the hook makes while no watch runs.
+class WatchSlot {
+public:
+    [[nodiscard]] bool Active() const {
+        return active.load(std::memory_order_relaxed);
+    }
+    void Start(ValueWatch watch);
+    /// At a present's reply: samples the watch, if one runs.
+    void Sample(u64 present);
+    /// Ends the watch and hands its rows over. The caller builds the reply from them outside
+    /// the slot's lock, so no present reply waits on that.
+    [[nodiscard]] std::optional<ValueWatch> Finish();
+
+private:
+    std::atomic<bool> active{};
+    std::mutex mutex;
+    std::optional<ValueWatch> watch;
 };
 
 /// One step of input or input_sequence: what to hold, for how many presented frames, or for how
