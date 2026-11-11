@@ -492,6 +492,26 @@ TEST_CASE("Value watches read their addresses once per present of the call",
                                    {13, 243.0, nullptr, 32768}});
 }
 
+TEST_CASE("A finished watch hands its rows over before the reply is built",
+          "[core][nx2_debug_server]") {
+    using Core::Nx2Debug::ScanType;
+    GuestPages guest;
+    Core::Nx2Debug::WatchSlot slot;
+    REQUIRE_FALSE(slot.Active());
+    slot.Start(Core::Nx2Debug::ValueWatch{guest.process.GetMemory(), {{0x4010, ScanType::F32}}, 10, 20});
+    REQUIRE(slot.Active());
+    slot.Sample(10);
+    slot.Sample(11);
+    // Finish leaves the slot empty and inactive: the rows belong to the caller, so building the
+    // JSON from them takes no lock that a present reply needs.
+    const auto done = slot.Finish();
+    REQUIRE_FALSE(slot.Active());
+    slot.Sample(12);
+    REQUIRE_FALSE(slot.Finish());
+    REQUIRE(done);
+    REQUIRE(done->Json()["sampled"] == 2);
+}
+
 TEST_CASE("Watches name at most 8 aligned addresses, frame steps only", "[core][nx2_debug_server]") {
     ScopedSystemTestContext context;
     Core::System system;
