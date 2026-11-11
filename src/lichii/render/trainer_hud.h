@@ -40,7 +40,10 @@ constexpr s64 TRAIL_MS = 500;
 /// clear of Ocarina's minimap (bottom-right) and the centre. One layout unit is a pixel at 720p.
 [[nodiscard]] QRect PanelRect(const QRect& image);
 
-/// Paints the input panel with its top-left corner at the painter's origin.
+/// Paints the input panel with its top-left corner at the painter's origin: the base layer (the
+/// panel and the idle shapes, which never change), then the live layer over it.
 void PaintInputPanel(QPainter& painter, const InputFrame& frame);
+void PaintInputBase(QPainter& painter);
+void PaintInputLive(QPainter& painter, const InputFrame& frame);
 
 } // namespace TrainerHud

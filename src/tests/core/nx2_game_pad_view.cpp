@@ -35,9 +35,8 @@ TEST_CASE("The trainer overlay reads what the game is given from both controller
     });
     // Not connected: its input is not the game's.
     handheld.SetInputInjector([] {
-        return std::optional{InjectedInput{.buttons = NpadButton::ZL,
-                                           .left = AnalogStickState{.x = 20000, .y = 0},
-                                           .right = {}}};
+        return std::optional{InjectedInput{
+            .buttons = NpadButton::ZL, .left = AnalogStickState{.x = 20000, .y = 0}, .right = {}}};
     });
     auto view = Core::Nx2Debug::ReadGamePad(system);
     REQUIRE(view.present == 41);
