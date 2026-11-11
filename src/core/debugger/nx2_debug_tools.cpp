@@ -2278,7 +2278,8 @@ json Features(ToolState&, const json&) {
     json result;
     if (!Common::KitStall::HooksEnabled()) {
         result = {{"features",
-                   {"input_ms", "measure", "pause", "step_frames", "time_control", "switches"}},
+                   {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
+                    "pre_roll", "capture_frames", "scan_memory"}},
                   {"kit", 2},
                   {"kit_hooks", false}};
     } else {
