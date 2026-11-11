@@ -1174,10 +1174,10 @@ TEST_CASE("Input recordings hold presses shorter than a present unless the mode 
     };
     // Records one run: per count, the button state at its present and at each npad read after
     // it. Returns whether Y is in the recording at each present.
-    const auto record = [&](std::string_view mode, const std::vector<std::vector<bool>>& counts) {
-        const json started = Core::Nx2Debug::CallTool(system, "input_record",
-                                                       {{"action", "start"}, {"mode", mode}});
-        REQUIRE(started["mode"] == mode);
+    const auto record = [&](const std::vector<std::vector<bool>>& counts) {
+        const json started =
+            Core::Nx2Debug::CallTool(system, "input_record", {{"action", "start"}});
+        REQUIRE(started["mode"] == "any");
         for (const auto& reads : counts) {
             pressed = reads.front();
             const u64 present = ++Core::g_nx2_present_count;
@@ -1193,7 +1193,7 @@ TEST_CASE("Input recordings hold presses shorter than a present unless the mode 
         }
         const json stopped =
             Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}});
-        REQUIRE(stopped["mode"] == mode);
+        REQUIRE(stopped["mode"] == "any");
         REQUIRE(Core::HID::g_npad_read_hook.load() == nullptr);
         std::vector<bool> held;
         for (const json& step : stopped["steps"]) {
@@ -1207,18 +1207,20 @@ TEST_CASE("Input recordings hold presses shorter than a present unless the mode 
     };
     // A tap that starts and ends inside the second count.
     const std::vector<std::vector<bool>> tap{{false}, {false, true, false}, {false}, {false}};
-    REQUIRE(record("any", tap) == std::vector<bool>{false, true, false, false});
-    REQUIRE(record("sample", tap) == std::vector<bool>{false, false, false, false});
-    // A press from the middle of the second count to the middle of the fifth: "any" adds the
-    // count it began in, so the lengths differ by one present at most.
+    REQUIRE(record(tap) == std::vector<bool>{false, true, false, false});
+    // A press from the middle of the second count to the middle of the fifth: the count it
+    // began in has it too.
     const std::vector<std::vector<bool>> hold{{false}, {false, true}, {true}, {true},
                                               {true, false}, {false}};
-    REQUIRE(record("any", hold) == std::vector<bool>{false, true, true, true, true, false});
-    REQUIRE(record("sample", hold) == std::vector<bool>{false, false, true, true, true, false});
+    REQUIRE(record(hold) == std::vector<bool>{false, true, true, true, true, false});
     // Stop closes the count that is still running, with what it had so far.
-    REQUIRE(record("any", {{false}, {false, true}}) == std::vector<bool>{false, true});
-    REQUIRE_THROWS(Core::Nx2Debug::CallTool(system, "input_record",
-                                            {{"action", "start"}, {"mode", "every"}}));
+    REQUIRE(record({{false}, {false, true}}) == std::vector<bool>{false, true});
+    REQUIRE_THROWS_WITH(Core::Nx2Debug::CallTool(system, "input_record",
+                                                 {{"action", "start"}, {"mode", "sample"}}),
+                        Catch::Matchers::ContainsSubstring("mode sample was removed"));
+    REQUIRE_THROWS_WITH(Core::Nx2Debug::CallTool(system, "input_record",
+                                                 {{"action", "start"}, {"npad_sync", false}}),
+                        Catch::Matchers::ContainsSubstring("unknown key"));
 }
 
 TEST_CASE("Luma watch keeps one sample per composite until it is done", "[core][nx2_debug_server]") {
@@ -1291,7 +1293,7 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
                    "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                    "step_frames", "time_control", "time_trace", "switches", "record_anchor",
                    "pre_roll", "capture_frames", "scan_memory", "watch", "notify"}},
-                 {"kit", 2},
+                 {"kit", 3},
                  {"kit_hooks", true}});
 }
 
@@ -1397,19 +1399,6 @@ TEST_CASE("Input recordings take the stick at the present's reply", "[core][nx2_
     REQUIRE(stopped["npad_sync"] == true);
     REQUIRE(stopped["blocked_us"]["presents"] == 3);
     REQUIRE(stopped["blocked_us"]["max"].get<u64>() >= stopped["blocked_us"]["mean"].get<u64>());
-    // Mode sample keeps one phase and no blocked time.
-    static_cast<void>(Core::Nx2Debug::CallTool(system, "input_record",
-                                               {{"action", "start"}, {"mode", "sample"}}));
-    const json sampled = Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}});
-    REQUIRE(sampled["npad_sync"] == false);
-    REQUIRE_FALSE(sampled.contains("steps_at_count"));
-    // A recording made without the npad update at the reply says so.
-    REQUIRE(Core::Nx2Debug::CallTool(system, "input_record",
-                                     {{"action", "start"}, {"npad_sync", false}})["npad_sync"] ==
-            false);
-    REQUIRE(Core::Nx2Debug::CallTool(system, "input_record", {{"action", "stop"}})["npad_sync"] ==
-            false);
-    REQUIRE_FALSE(sampled.contains("blocked_us"));
 }
 
 TEST_CASE("A frame-step replay holds the present reply hook only while it runs",
@@ -1453,9 +1442,10 @@ TEST_CASE("A frame-step replay holds the present reply hook only while it runs",
         system, "input_sequence",
         {{"steps", {{{"buttons", {"A"}}, {"frames", 3}}, {{"frames", 3}}}}, {"start_present", target}});
     REQUIRE(played["landed_present"].get<u64>() == target);
-    REQUIRE(played["npad_sync"] == true);
-    REQUIRE_THROWS(Core::Nx2Debug::CallTool(
-        system, "input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", "yes"}}));
+    REQUIRE_FALSE(played.contains("npad_sync"));
+    REQUIRE_THROWS_WITH(Core::Nx2Debug::CallTool(system, "input_sequence",
+                                                 {{"steps", {{{"frames", 1}}}}, {"npad_sync", false}}),
+                        Catch::Matchers::ContainsSubstring("npad_sync was removed"));
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
 }
 
@@ -1521,7 +1511,6 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
     REQUIRE(refused("luma_watch", {{"presents", 5}}));
     REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}},
                                        {"start_present", Core::g_nx2_present_count.load() + 100}}));
-    REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", true}}));
     REQUIRE(refused("input_sequence",
                     {{"steps", {{{"frames", 1}}}}, {"watch", {{{"address", "0x4000"}, {"as", "u32"}}}}}));
     REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}}, {"capture_frames", {0}}}));
@@ -1536,7 +1525,7 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
             json{{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
                                "pre_roll", "scan_memory", "notify"}},
-                 {"kit", 2},
+                 {"kit", 3},
                  {"kit_hooks", false}});
 }
 
@@ -1621,7 +1610,7 @@ TEST_CASE("The pre-roll ring holds the input from the anchor to a recording's st
     const json status = call("input_record", {{"action", "status"}});
     REQUIRE(status["pre_roll"]["presents"] == 7);
     REQUIRE_THROWS_WITH(call("input_record", {{"action", "start"}, {"mode", "sample"}}),
-                        Catch::Matchers::ContainsSubstring("mode any"));
+                        Catch::Matchers::ContainsSubstring("mode sample was removed"));
     REQUIRE(call("record_anchor", {{"off", true}})["armed"] == false);
     REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);

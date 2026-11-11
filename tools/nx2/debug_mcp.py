@@ -319,10 +319,9 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"action": {"type": "string", "enum": ["start", "status", "stop"]},
-                           "mode": {"type": "string", "enum": ["any", "sample"],
-                                    "description": "start only. any (default): every button "
-                                                   "given during a present. sample: the input "
-                                                   "at the present only."}},
+                           "mode": {"type": "string", "enum": ["any"],
+                                    "description": "start only. any (the only mode): every "
+                                                   "button given during a present."}},
             "required": ["action"],
         },
     },
@@ -343,7 +342,7 @@ TOOLS = [
     {
         "name": "features",
         "description": "What this build's debug server supports beyond origin: {features: "
-                       "[...], kit}. An older exe answers 'unknown method'. kit 2 has npad_sync.",
+                       "[...], kit}. An older exe answers 'unknown method'. kit 3: npad_sync always on.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {

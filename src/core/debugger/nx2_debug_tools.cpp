@@ -1162,12 +1162,11 @@ void DropReplyHook() {
 }
 
 /// The frame-step replay running now, for the reply hook: the presents it covers.
+/// While it is active, the reply hook runs one npad update at each covered present's reply (the
+/// npad sync), so the newest entry carries that present's step when the game resumes.
 struct ReplaySync {
     std::mutex mutex;
     bool active{};
-    /// npad_sync: one npad update at each covered present's reply, so the newest entry carries
-    /// that present's step when the game resumes.
-    bool sync{true};
     u64 start{};
     u64 end{};
     /// The clip's first present: start plus the pre-roll's frames (start without a pre-roll).
@@ -1209,7 +1208,7 @@ std::vector<std::pair<u64, ScanType>> ParseWatch(const json& list) {
 bool NoteReplayReply(u64 present) {
     ReplaySync& sync = GetReplaySync();
     KitLock lock{sync.mutex, "replay sync mutex", __func__};
-    return sync.active && sync.sync && present >= sync.start && present < sync.end;
+    return sync.active && present >= sync.start && present < sync.end;
 }
 
 /// A list of distinct clip frame numbers (0 to clip_frames - 1), at most max of them, sorted.
@@ -1371,15 +1370,11 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         start_present = value.get<u64>();
         RequireKitHooks("start_present");
     }
-    if (params.contains("npad_sync") && !params.at("npad_sync").is_boolean()) {
-        throw std::runtime_error{"npad_sync must be true or false"};
+    if (params.contains("npad_sync")) {
+        throw std::runtime_error{
+            "npad_sync was removed: the npad sync is always on with the kit's hooks"};
     }
     const bool kit_hooks = Common::KitStall::HooksEnabled();
-    // Default on with the kit's hooks; asking for it without them fails.
-    const bool npad_sync = params.value("npad_sync", kit_hooks);
-    if (npad_sync) {
-        RequireKitHooks("npad_sync");
-    }
     std::vector<std::pair<u64, ScanType>> watched;
     if (params.contains("watch")) {
         if (timed) {
@@ -1440,7 +1435,6 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         ReplaySync& sync = GetReplaySync();
         KitLock lock{sync.mutex, "replay sync mutex", __func__};
         sync.active = true;
-        sync.sync = npad_sync;
         sync.start = start;
         sync.end = start + total;
         sync.clip = start + clip_offset;
@@ -1541,7 +1535,6 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         result["clock"] = "host_time";
     } else if (measure || start_present) {
         result["landed_present"] = landed;
-        result["npad_sync"] = npad_sync;
     }
     if (measure) {
         if (timed && (presents < 2 || presents > MAX_MEASURED_PRESENTS)) {
@@ -1582,7 +1575,6 @@ json Input(ToolState& state, const json& params, const ClientGone& client_gone) 
     step.erase("timeout_s");
     step.erase("measure");
     step.erase("start_present");
-    step.erase("npad_sync");
     return RunInput(state, {ParseInputStep(step)}, params, client_gone);
 }
 
@@ -1636,35 +1628,30 @@ struct Recorder {
     std::array<HID::EmulatedController*, 2> sources{};
     std::string controller_name;
     std::optional<InputRecording> recording;
-    /// Mode "any" (default): a count's step holds every button the npad updater gave the game at
-    /// any time during that count. Mode "sample": the input at the start of the count only.
-    bool any{true};
-    /// Mode "any": the count still running, closed into the recordings at the next present.
-    /// input has the sticks of the count's start; reply_input those of the present's reply.
+    /// The count still running, closed into the recordings at the next present. A count's step
+    /// holds every button the npad updater gave the game at any time during that count (mode
+    /// "any"). input has the sticks of the count's start; reply_input those of the present's reply.
     struct OpenCount {
         u64 present;
         HID::InjectedInput input;
         std::optional<HID::InjectedInput> reply_input;
         std::chrono::steady_clock::time_point counted;
-        /// npad_sync: the npad update at this reply runs now; synced is what it wrote.
+        /// The npad update at this reply runs now; synced is what it wrote.
         bool sync_pending{};
         std::optional<HID::InjectedInput> synced;
     };
     std::optional<OpenCount> open;
-    /// Mode "any": the same presents with the sticks of the count's start, the phase before
-    /// 2026-11-10, for one A/B (temporary).
+    /// The same presents with the sticks of the count's start, the phase before 2026-11-10, for
+    /// one A/B (temporary).
     std::optional<InputRecording> at_count;
-    /// Mode "any": the time from each present's count to its reply, which the game spends blocked
-    /// in the present call.
+    /// The time from each present's count to its reply, which the game spends blocked in the
+    /// present call.
     u64 blocked_sum_us{};
     u64 blocked_max_us{};
     u64 blocked_presents{};
     bool uses_reply_hook{};
-    /// Mode "any": one npad update at each present's reply, as replays do, so the reply stick
-    /// is exactly the newest npad entry the game reads next.
-    bool npad_sync{};
     /// record_anchor: the pre-roll ring and the anchor present it was marked with. The ring
-    /// records as mode "any" with npad_sync, and goes on through recordings.
+    /// records as a recording does, and goes on through recordings.
     std::optional<PreRollRing> pre_roll;
     std::optional<u64> anchor;
     /// The pre-roll of the recording running now: cut from the ring once the ring reached the
@@ -1761,12 +1748,10 @@ void RecordNpadRead(const HID::EmulatedController& controller, HID::NpadButton h
 /// Installs the hooks of a recording or of the pre-roll ring; the reply hook only once.
 void InstallRecordHooks(Recorder& recorder) {
     g_nx2_present_hook.store(RecordPresent, std::memory_order_release);
-    if (recorder.any) {
-        HID::g_npad_read_hook.store(RecordNpadRead, std::memory_order_release);
-        if (!recorder.uses_reply_hook) {
-            recorder.uses_reply_hook = true;
-            UseReplyHook();
-        }
+    HID::g_npad_read_hook.store(RecordNpadRead, std::memory_order_release);
+    if (!recorder.uses_reply_hook) {
+        recorder.uses_reply_hook = true;
+        UseReplyHook();
     }
 }
 
@@ -1785,7 +1770,7 @@ void CutPreRoll(Recorder& recorder, bool now) {
                                         .steps = recorder.pre_roll->StepsBefore(start)};
 }
 
-/// Mode "any": moves the open count into the pre-roll ring and the recordings: its buttons with
+/// Moves the open count into the pre-roll ring and the recordings: its buttons with
 /// the sticks of the present's reply (or of its start, without a reply), and with the sticks of
 /// its start. False once a recording is truncated.
 bool CloseCount(Recorder& recorder) {
@@ -1809,7 +1794,7 @@ bool CloseCount(Recorder& recorder) {
 
 /// g_nx2_present_hook while input_record records. Runs right after the present count becomes
 /// present, so it reads the input the injector and the owner's pad give at the start of that
-/// count. Mode "any" then keeps the count open for the npad reads during it.
+/// count, then keeps the count open for the npad reads during it.
 void RecordPresent(u64 present) {
     const auto counted = std::chrono::steady_clock::now();
     Recorder& recorder = GetRecorder();
@@ -1820,24 +1805,19 @@ void RecordPresent(u64 present) {
         (recorder.open && present <= recorder.open->present)) {
         return;
     }
-    const HID::InjectedInput input = GameInput(recorder.sources);
-    const bool kept =
-        recorder.any ? CloseCount(recorder) : recorder.recording->Add(present, input);
-    if (!kept && !recorder.pre_roll) {
+    if (!CloseCount(recorder) && !recorder.pre_roll) {
         ClearRecordHooks(recorder);
         return;
     }
-    if (recorder.any) {
-        recorder.open = Recorder::OpenCount{.present = present,
-                                            .input = input,
-                                            .reply_input = std::nullopt,
-                                            .counted = counted,
-                                            .sync_pending = false,
-                                            .synced = std::nullopt};
-    }
+    recorder.open = Recorder::OpenCount{.present = present,
+                                        .input = GameInput(recorder.sources),
+                                        .reply_input = std::nullopt,
+                                        .counted = counted,
+                                        .sync_pending = false,
+                                        .synced = std::nullopt};
 }
 
-/// g_nx2_present_reply_hook in mode "any": takes the open count's sticks at the present's reply,
+/// g_nx2_present_reply_hook: takes the open count's sticks at the present's reply,
 /// after which the game reads its next input, and the time it was blocked.
 void RecordPresentReply(u64 present) {
     Recorder& recorder = GetRecorder();
@@ -1852,7 +1832,7 @@ void RecordPresentReply(u64 present) {
     recorder.blocked_sum_us += blocked_us;
     recorder.blocked_max_us = (std::max)(recorder.blocked_max_us, blocked_us);
     ++recorder.blocked_presents;
-    // With npad_sync, exactly the entry the update wrote; otherwise the getters now.
+    // Exactly the entry the npad update at this reply wrote; the getters now if it did not run.
     HID::InjectedInput input =
         recorder.open->synced ? *recorder.open->synced : GameInput(recorder.sources);
     recorder.open->sync_pending = false;
@@ -1861,7 +1841,7 @@ void RecordPresentReply(u64 present) {
     recorder.open->reply_input = input;
 }
 
-/// HID::g_npad_read_hook in mode "any": ORs the buttons the npad updater reads for the game into
+/// HID::g_npad_read_hook: ORs the buttons the npad updater reads for the game into
 /// the open count. A read that may belong to another count (the count moved around it) is left
 /// out, so scripted input of the next count never leaks into this one.
 void RecordNpadRead(const HID::EmulatedController& controller, HID::NpadButton held,
@@ -1889,11 +1869,11 @@ void RecordNpadRead(const HID::EmulatedController& controller, HID::NpadButton h
     }
 }
 
-/// Mode "any" with npad_sync: whether the open count wants the npad updated at its reply.
+/// Whether the open count wants the npad updated at its reply.
 bool RecordingWantsSync(u64 present) {
     Recorder& recorder = GetRecorder();
     KitLock lock{recorder.mutex, "recorder mutex", __func__};
-    if (!recorder.npad_sync || !recorder.open || recorder.open->present != present) {
+    if (!recorder.open || recorder.open->present != present) {
         return false;
     }
     recorder.open->sync_pending = true;
@@ -2017,8 +1997,6 @@ json RecordAnchor(ToolState& state, const json& params) {
         recorder.anchor.reset();
         if (!recorder.uses_reply_hook) {
             recorder.sources = sources;
-            recorder.any = true;
-            recorder.npad_sync = true;
             recorder.open.reset();
             InstallRecordHooks(recorder);
             recording_active.store(true, std::memory_order_relaxed);
@@ -2032,13 +2010,14 @@ json RecordAnchor(ToolState& state, const json& params) {
     return PreRollStatus(recorder);
 }
 
-/// {action: "start" | "status" | "stop", mode?: "any" | "sample"}. Records the input the game
-/// is given at each present from the next one on; stop returns it as input_sequence steps.
+/// {action: "start" | "status" | "stop", mode?: "any"}. Records the input the game is given at
+/// each present from the next one on; stop returns it as input_sequence steps. Every recording
+/// is mode "any" with the npad sync; the replies still name both, so a saved file says how it
+/// was made.
 json InputRecord(ToolState& state, const json& params) {
     for (const auto& [key, value] : params.items()) {
-        if (key != "action" && key != "mode" && key != "npad_sync") {
-            throw std::runtime_error{
-                fmt::format("unknown key \"{}\": want action, mode or npad_sync", key)};
+        if (key != "action" && key != "mode") {
+            throw std::runtime_error{fmt::format("unknown key \"{}\": want action or mode", key)};
         }
     }
     const json action_value = params.value("action", json{});
@@ -2046,14 +2025,9 @@ json InputRecord(ToolState& state, const json& params) {
     Recorder& recorder = GetRecorder();
     if (action == "start") {
         RequireKitHooks("input_record");
-        const std::string mode = params.value("mode", std::string{"any"});
-        if (mode != "any" && mode != "sample") {
-            throw std::runtime_error{"mode must be any or sample"};
+        if (params.contains("mode") && params.at("mode") != "any") {
+            throw std::runtime_error{"mode must be any; mode sample was removed"};
         }
-        if (params.contains("npad_sync") && !params.at("npad_sync").is_boolean()) {
-            throw std::runtime_error{"npad_sync must be true or false"};
-        }
-        const bool npad_sync = params.value("npad_sync", true);
         const auto picked = InputController(state);
         KitLock lock{recorder.mutex, "recorder mutex", __func__};
         if (recorder.recording) {
@@ -2061,14 +2035,8 @@ json InputRecord(ToolState& state, const json& params) {
                 "already recording since present {}; stop it first",
                 recorder.recording->StartPresent())};
         }
-        if (recorder.pre_roll && mode != "any") {
-            throw std::runtime_error{
-                "the pre-roll ring (record_anchor) records in mode any; turn it off first"};
-        }
         recorder.sources = RecordedControllers(state);
         recorder.controller_name = picked.second;
-        recorder.any = mode == "any";
-        recorder.npad_sync = recorder.any && npad_sync;
         // The ring's open count goes on: it is the last present of the pre-roll.
         if (!recorder.pre_roll) {
             recorder.open.reset();
@@ -2082,17 +2050,13 @@ json InputRecord(ToolState& state, const json& params) {
                                    MAX_INPUT_FRAMES, MAX_INPUT_STEPS);
         recording_active.store(true, std::memory_order_relaxed);
         GetWatchdog().Ensure();
-        if (recorder.any) {
-            recorder.at_count.emplace(recorder.recording->StartPresent(), MAX_INPUT_FRAMES,
-                                      MAX_INPUT_STEPS);
-        } else {
-            recorder.at_count.reset();
-        }
+        recorder.at_count.emplace(recorder.recording->StartPresent(), MAX_INPUT_FRAMES,
+                                  MAX_INPUT_STEPS);
         return {{"recording", true},
                 {"start_present", recorder.recording->StartPresent()},
                 {"controller", picked.second},
-                {"mode", mode},
-                {"npad_sync", recorder.npad_sync}};
+                {"mode", "any"},
+                {"npad_sync", true}};
     }
     if (action == "status") {
         json controllers = ControllerStates(RecordedControllers(state));
@@ -2108,7 +2072,7 @@ json InputRecord(ToolState& state, const json& params) {
                       {"presents", recorder.recording->Presents() + (open_in_recording ? 1 : 0)},
                       {"steps", recorder.recording->Steps().size()},
                       {"controller", recorder.controller_name},
-                      {"mode", recorder.any ? "any" : "sample"},
+                      {"mode", "any"},
                       {"truncated", recorder.recording->Truncated() ||
                                         (recorder.at_count && recorder.at_count->Truncated())},
                       {"controllers", std::move(controllers)}};
@@ -2122,8 +2086,6 @@ json InputRecord(ToolState& state, const json& params) {
         std::optional<InputRecording> recording;
         std::optional<InputRecording> at_count;
         std::string name;
-        bool any{};
-        bool npad_sync{};
         u64 blocked_sum_us{}, blocked_max_us{}, blocked_presents{};
         std::optional<Recorder::PreRollCut> cut;
         {
@@ -2140,8 +2102,6 @@ json InputRecord(ToolState& state, const json& params) {
             CutPreRoll(recorder, true);
             cut = std::move(recorder.cut);
             recorder.cut.reset();
-            any = recorder.any;
-            npad_sync = recorder.npad_sync;
             recording = std::move(recorder.recording);
             recorder.recording.reset();
             at_count = std::move(recorder.at_count);
@@ -2149,10 +2109,8 @@ json InputRecord(ToolState& state, const json& params) {
             blocked_sum_us = recorder.blocked_sum_us;
             blocked_max_us = recorder.blocked_max_us;
             blocked_presents = recorder.blocked_presents;
-            if (recorder.pre_roll) {
-                // The ring goes on as before the recording.
-                recorder.npad_sync = true;
-            } else {
+            // The ring goes on as before the recording.
+            if (!recorder.pre_roll) {
                 recorder.sources = {};
             }
             name = std::move(recorder.controller_name);
@@ -2169,8 +2127,8 @@ json InputRecord(ToolState& state, const json& params) {
                        {"start_present", recording->StartPresent()},
                        {"end_present", recording->StartPresent() + recording->Presents() - 1},
                        {"controller", std::move(name)},
-                       {"mode", any ? "any" : "sample"},
-                       {"npad_sync", npad_sync},
+                       {"mode", "any"},
+                       {"npad_sync", true},
                        {"truncated", recording->Truncated() || (at_count && at_count->Truncated())}};
         if (at_count) {
             result["steps_at_count"] = steps_json(*at_count);
@@ -2241,7 +2199,7 @@ json Features(ToolState&, const json&) {
         result = {{"features",
                    {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
                     "pre_roll", "scan_memory", "notify"}},
-                  {"kit", 2},
+                  {"kit", 3},
                   {"kit_hooks", false}};
     } else {
         result = {{"features",
@@ -2249,7 +2207,7 @@ json Features(ToolState&, const json&) {
                     "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                     "step_frames", "time_control", "time_trace", "switches", "record_anchor",
                     "pre_roll", "capture_frames", "scan_memory", "watch", "notify"}},
-                  {"kit", 2},
+                  {"kit", 3},
                   {"kit_hooks", true}};
     }
     if (const u64 block = FileSys::OotTimeControl::BlockAddress(); block != 0) {
