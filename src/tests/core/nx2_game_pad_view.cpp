@@ -12,6 +12,8 @@
 #include "hid_core/hid_core.h"
 #include "tests/core/system_test_context.h"
 
+using nlohmann::json;
+
 TEST_CASE("The trainer overlay reads what the game is given from both controllers",
           "[core][nx2_debug_server]") {
     using namespace Core::HID;
@@ -234,4 +236,57 @@ TEST_CASE("The trainer overlay shows PRE while a pre-roll plays, then REPLAY for
     view = Core::Nx2Debug::ReadGamePad(system);
     REQUIRE_FALSE(view.replaying);
     REQUIRE(view.pre_roll_left == 0);
+}
+
+TEST_CASE("The trainer overlay reads the pre-roll ring's kept and lost presents",
+          "[core][nx2_debug_server]") {
+    using namespace Core::HID;
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& player1 = *system.HIDCore().GetEmulatedController(NpadIdType::Player1);
+    player1.SetNpadStyleIndex(NpadStyleIndex::Fullkey);
+    player1.Connect();
+    const u64 old_count = Core::g_nx2_present_count.load();
+    const auto anchor = [&](const json& params) {
+        return Core::Nx2Debug::CallTool(system, "record_anchor", params);
+    };
+    SCOPE_EXIT {
+        static_cast<void>(anchor({{"off", true}}));
+        player1.Disconnect();
+        Core::g_nx2_present_count = old_count;
+    };
+    const auto present = [] {
+        const u64 count = ++Core::g_nx2_present_count;
+        if (const auto hook = Core::g_nx2_present_hook.load()) {
+            hook(count);
+        }
+        if (const auto reply = Core::g_nx2_present_reply_hook.load()) {
+            reply(count);
+        }
+    };
+    Core::g_nx2_present_count = 1000;
+    REQUIRE_FALSE(Core::Nx2Debug::ReadGamePad(system).pre_roll_armed);
+
+    static_cast<void>(anchor(json::object()));
+    for (int i = 0; i < 3; ++i) {
+        present();
+    }
+    auto view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.pre_roll_armed);
+    REQUIRE_FALSE(view.recording); // the ring alone is not a recording
+    REQUIRE(view.pre_roll_kept == 3);
+    REQUIRE(view.pre_roll_kept ==
+            Core::Nx2Debug::CallTool(system, "input_record",
+                                     {{"action", "status"}})["pre_roll"]["presents"]
+                .get<u64>());
+    REQUIRE(view.pre_roll_lost == 0);
+
+    // An anchor 10 presents before the ring's first: those 10 are lost.
+    const json status = anchor({{"present", 990}});
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.pre_roll_lost == status["lost_presents"].get<u64>());
+    REQUIRE(view.pre_roll_lost == 10);
+
+    static_cast<void>(anchor({{"off", true}}));
+    REQUIRE_FALSE(Core::Nx2Debug::ReadGamePad(system).pre_roll_armed);
 }

@@ -25,6 +25,8 @@ const QColor REC{229, 57, 53};
 const QColor REPLAY{30, 136, 229};
 const QColor WAIT{120, 120, 120};
 const QColor PRE{21, 101, 192}; ///< a darker REPLAY: replayed input before the clip
+const QColor RING{70, 70, 70};
+const QColor WARNING{239, 108, 0};
 
 constexpr double STICK_RADIUS = 26.0;
 
@@ -125,7 +127,7 @@ void StickText(QPainter& painter, QPointF top_left, s32 x, s32 y) {
                      QString::number(reading.magnitude, 'f', 2));
 }
 
-/// The REC, REPLAY, PRE and WAIT marks.
+/// The REC, PRE-ROLL, REPLAY, PRE and WAIT marks.
 void StateMarks(QPainter& painter, const InputFrame& frame) {
     painter.setFont(Font(12, true));
     double x = 8.0;
@@ -144,6 +146,14 @@ void StateMarks(QPainter& painter, const InputFrame& frame) {
                  .arg(frame.recorded)
                  .arg(frame.record_full ? QStringLiteral(" full") : QString{}),
              REC);
+    }
+    // The ring matters before Ctrl+F8: a lost present makes the replay start elsewhere.
+    if (frame.ring_armed && !frame.recording) {
+        if (frame.ring_lost != 0) {
+            mark(QStringLiteral("PRE-ROLL LOST %1").arg(frame.ring_lost), WARNING);
+        } else {
+            mark(QStringLiteral("PRE-ROLL %1").arg(frame.ring_kept), RING);
+        }
     }
     if (frame.replaying) {
         mark(QStringLiteral("▶ REPLAY"), REPLAY);
