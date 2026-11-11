@@ -714,22 +714,26 @@ The reply adds `capture_dir` and `captures`, one entry per frame:
  "path": ".../clip-1762876800-001/frame-01214.png"}
 ```
 
-- `present` is the guest present the shot shows (the screenshot's `present`). It can be later
-  than `target_present`, so read it, not the target.
+- `present` is the guest present the shot shows (the screenshot's `present`). It is
+  `target_present` unless the request came late (see below), so read it, not the target.
 - An entry with `error` and no `path` did not finish: "not requested" (no composite reached it
   in time) or "did not finish in time" (5 s after the clip's end).
 - `capture_dir` (`<dump dir>/clip-<session>-<n>/`) also gets `captures.json`, the same list.
 
 How it works: the wait loop of the call (the server thread, every 1 ms while captures are named)
-requests the screenshot of frame k once the composite of its own present has begun
+requests the screenshot of frame k once the composite of the present before it has begun
 (`g_nx2_composite_present`, set just before the composite and its screenshot check), and notes
-the shown present when the shot is done. A shot is that composite or a later one, never an
-earlier one. The renderer's
-callback thread encodes and writes the PNG, so the loop goes on at once. Nothing runs on the
-present path, and a call without `capture_frames` runs as before. A shot costs one frame readback
-on the GPU thread (as `screenshot` does) and about 1.5 MB of disk. A request that goes in after
-its composite passed the screenshot check lands on the next composite, so a shot can be a present
-late (often for adjacent frames), never early.
+the shown present when the shot is done. The request names its target as its first present
+(`RendererBase::RequestScreenshot`, `first_present`), and the renderer's screenshot check skips
+composites of earlier presents (`ScreenshotDue`), so the shot is the target's composite. Before
+kit 3 the request went in only once the target's composite had begun; that composite passed its
+check microseconds later, before the 1 ms poll, so 7 of 7 live shots were one present late.
+The renderer's callback thread encodes and writes the PNG, so the loop goes on at once. Nothing
+runs on the present path, and a call without `capture_frames` runs as before. A shot costs one
+frame readback on the GPU thread (as `screenshot` does) and about 1.5 MB of disk. One shot is
+pending at a time. When frame k + 1 is also named, its request goes in only after shot k is
+done, so it can miss its composite and land a present late, never early. A composite that shows
+two presents at once also gives a later `present`.
 
 The shots have the size `minimap.locate` reads (1280x720).
 

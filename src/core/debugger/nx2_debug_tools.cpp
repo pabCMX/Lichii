@@ -1232,10 +1232,10 @@ std::vector<u64> ClipFrames(const json& list, u64 clip_frames, size_t max, std::
 }
 
 /// input_sequence capture_frames: the input wait loop requests a 1280x720 screenshot of each
-/// named clip frame, so nothing runs on the present path. A request goes in once the target's
-/// composite has begun (CaptureDue): the shot is that composite or a later one, never an earlier
-/// one, and each entry names the present it shows. The renderer's callback thread encodes and
-/// writes the file.
+/// named clip frame, so nothing runs on the present path. A request goes in just before the
+/// target's composite (CaptureDue) and names the target as its first present: the shot is the
+/// target's composite, or a later one when the request came late, never an earlier one. Each
+/// entry names the present it shows. The renderer's callback thread encodes and writes the file.
 class ClipCaptures {
 public:
     ClipCaptures(ToolState& state, std::vector<u64> frames, u64 clip_present)
@@ -1280,7 +1280,7 @@ public:
                     done->set_value("");
                 }
             },
-            layout);
+            layout, Service::Nvnflinger::LayerStackId::Default, shot.target);
         pending = next++;
     }
 

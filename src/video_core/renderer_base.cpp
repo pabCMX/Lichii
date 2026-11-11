@@ -38,9 +38,16 @@ bool RendererBase::IsScreenshotPending() const {
     return renderer_settings.screenshot_requested;
 }
 
+bool RendererBase::ScreenshotDue() const {
+    return renderer_settings.screenshot_requested &&
+           Core::g_nx2_composite_present.load(std::memory_order_relaxed) >=
+               renderer_settings.screenshot_first_present;
+}
+
 void RendererBase::RequestScreenshot(void* data, std::function<void(bool)> callback,
                                      const Layout::FramebufferLayout& layout,
-                                     Service::Nvnflinger::LayerStackId layer_stack) {
+                                     Service::Nvnflinger::LayerStackId layer_stack,
+                                     u64 first_present) {
     if (renderer_settings.screenshot_requested) {
         LOG_ERROR(Render, "A screenshot is already requested or in progress, ignoring the request");
         return;
@@ -56,6 +63,7 @@ void RendererBase::RequestScreenshot(void* data, std::function<void(bool)> callb
     renderer_settings.screenshot_complete_callback = async_callback;
     renderer_settings.screenshot_framebuffer_layout = layout;
     renderer_settings.screenshot_layer_stack = layer_stack;
+    renderer_settings.screenshot_first_present = first_present;
     renderer_settings.screenshot_requested = true;
 }
 

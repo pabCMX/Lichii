@@ -510,7 +510,7 @@ vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConf
 }
 
 void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers) {
-    if (!renderer_settings.screenshot_requested) {
+    if (!ScreenshotDue()) {
         return;
     }
 
