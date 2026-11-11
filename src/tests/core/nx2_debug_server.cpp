@@ -1104,7 +1104,7 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
                    "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                    "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                   "pre_roll"}},
+                   "pre_roll", "capture_frames"}},
                  {"kit", 2},
                  {"kit_hooks", true}});
 }
@@ -1500,4 +1500,40 @@ TEST_CASE("Input sequences play a pre-roll before the clip", "[core][nx2_debug_s
     REQUIRE(inputs[offset + 4].buttons == Core::HID::NpadButton::None);
     REQUIRE(inputs[offset + 5].buttons == Core::HID::NpadButton::A);
     REQUIRE(inputs[offset + 6].buttons == Core::HID::NpadButton::A);
+}
+
+TEST_CASE("Clip captures name distinct clip frames, at most 32", "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    const auto refusal = [&system](const json& params) -> std::string {
+        try {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_sequence", params));
+        } catch (const std::runtime_error& error) {
+            return error.what();
+        }
+        return {};
+    };
+    const json clip = {{{"frames", 10}}};
+    json many = json::array();
+    for (int frame = 0; frame < 33; ++frame) {
+        many.push_back(frame);
+    }
+    using Catch::Matchers::ContainsSubstring;
+    REQUIRE_THAT(refusal({{"steps", {{{"ms", 50}}}}, {"capture_frames", {0}}}),
+                 ContainsSubstring("needs frame steps"));
+    REQUIRE_THAT(refusal({{"steps", clip}, {"capture_frames", json::array()}}),
+                 ContainsSubstring("1 to 32"));
+    REQUIRE_THAT(refusal({{"steps", {{{"frames", 40}}}}, {"capture_frames", many}}),
+                 ContainsSubstring("1 to 32"));
+    REQUIRE_THAT(refusal({{"steps", clip}, {"capture_frames", {3, 3}}}), ContainsSubstring("twice"));
+    REQUIRE_THAT(refusal({{"steps", clip}, {"capture_frames", {-1}}}),
+                 ContainsSubstring("not a clip frame"));
+    REQUIRE_THAT(refusal({{"steps", clip}, {"capture_frames", {10}}}),
+                 ContainsSubstring("not a clip frame (0 to 9)"));
+    // Clip frames count from the clip's step 0, after the pre-roll.
+    REQUIRE_THAT(refusal({{"pre_roll", {{{"frames", 5}}}}, {"steps", clip}, {"capture_frames", {12}}}),
+                 ContainsSubstring("not a clip frame (0 to 9)"));
 }

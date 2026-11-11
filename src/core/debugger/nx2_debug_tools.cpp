@@ -71,6 +71,8 @@ constexpr u64 MAX_MEASURED_PRESENTS = std::tuple_size_v<decltype(g_nx2_present_t
 /// so a pre-roll and its clip can still fit one input_sequence call.
 constexpr u64 MAX_PRE_ROLL_PRESENTS = 18000;
 constexpr size_t MAX_PRE_ROLL_STEPS = 3000;
+/// Screenshots one input_sequence capture_frames call saves at most (about 1.5 MB each).
+constexpr size_t MAX_CAPTURE_FRAMES = 32;
 
 constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
     {"A", HID::NpadButton::A},         {"B", HID::NpadButton::B},
@@ -101,6 +103,7 @@ struct ToolState {
     std::string log_filter{Settings::values.log_filter.GetValue()};
     u64 captures{};
     u64 screenshots{};
+    u64 clips{};
     u64 samples{};
     u64 traces{};
     u64 gpu_reads{};
@@ -202,6 +205,28 @@ void AppendPng(void* context, void* data, int size) {
     auto& png = *static_cast<std::vector<u8>*>(context);
     const u8* const bytes = static_cast<const u8*>(data);
     png.insert(png.end(), bytes, bytes + size);
+}
+
+/// A renderer screenshot (BGRA, rows bottom up when invert_y) as a PNG. Throws std::runtime_error.
+std::vector<u8> ScreenshotPng(const std::vector<u8>& pixels, const Layout::FramebufferLayout& layout,
+                              bool invert_y) {
+    std::vector<u8> rgb(size_t{layout.width} * layout.height * 3);
+    for (u32 y = 0; y < layout.height; ++y) {
+        const u8* source = pixels.data() + size_t{invert_y ? layout.height - 1 - y : y} * layout.width * 4;
+        u8* target = rgb.data() + size_t{y} * layout.width * 3;
+        for (u32 x = 0; x < layout.width; ++x, source += 4, target += 3) {
+            target[0] = source[2];
+            target[1] = source[1];
+            target[2] = source[0];
+        }
+    }
+    std::vector<u8> png;
+    if (!stbi_write_png_to_func(AppendPng, &png, static_cast<int>(layout.width),
+                                static_cast<int>(layout.height), 3, rgb.data(),
+                                static_cast<int>(layout.width * 3))) {
+        throw std::runtime_error{"PNG encoding failed"};
+    }
+    return png;
 }
 
 json Status(ToolState& state, const json& params) {
@@ -394,24 +419,10 @@ Png CaptureScreenshot(System& system, u32 height, std::chrono::seconds timeout,
     // Stored on the GPU thread before the callback was started. The debug server is serial, and
     // a bug bundle's screenshot is refused while this one is pending, so read it now.
     const u64 present = renderer.ScreenshotPresent();
-    std::vector<u8> rgb(size_t{layout.width} * layout.height * 3);
-    for (u32 y = 0; y < layout.height; ++y) {
-        const u8* source = pixels->data() + size_t{invert_y ? layout.height - 1 - y : y} * layout.width * 4;
-        u8* target = rgb.data() + size_t{y} * layout.width * 3;
-        for (u32 x = 0; x < layout.width; ++x, source += 4, target += 3) {
-            target[0] = source[2];
-            target[1] = source[1];
-            target[2] = source[0];
-        }
-    }
-    Png png{.bytes = {}, .width = layout.width, .height = layout.height};
-    if (!stbi_write_png_to_func(AppendPng, &png.bytes, static_cast<int>(layout.width),
-                                static_cast<int>(layout.height), 3, rgb.data(),
-                                static_cast<int>(layout.width * 3))) {
-        throw std::runtime_error{"PNG encoding failed"};
-    }
-    png.present = present;
-    return png;
+    return {.bytes = ScreenshotPng(*pixels, layout, invert_y),
+            .width = layout.width,
+            .height = layout.height,
+            .present = present};
 }
 
 namespace {
@@ -988,6 +999,127 @@ bool NoteReplayReply(u64 present) {
     return sync.sync;
 }
 
+/// A list of distinct clip frame numbers (0 to clip_frames - 1), at most max of them, sorted.
+std::vector<u64> ClipFrames(const json& list, u64 clip_frames, size_t max, std::string_view name) {
+    if (!list.is_array() || list.empty() || list.size() > max) {
+        throw std::runtime_error{fmt::format("{} must be an array of 1 to {} clip frames", name, max)};
+    }
+    std::vector<u64> frames;
+    for (const json& frame : list) {
+        if (!frame.is_number_integer() || frame.get<s64>() < 0 || frame.get<u64>() >= clip_frames) {
+            throw std::runtime_error{fmt::format("{}: {} is not a clip frame (0 to {})", name,
+                                                 frame.dump(), clip_frames - 1)};
+        }
+        frames.push_back(frame.get<u64>());
+    }
+    std::ranges::sort(frames);
+    if (std::ranges::adjacent_find(frames) != frames.end()) {
+        throw std::runtime_error{fmt::format("{} names a frame twice", name)};
+    }
+    return frames;
+}
+
+/// input_sequence capture_frames: the input wait loop requests a 1280x720 screenshot of each
+/// named clip frame, so nothing runs on the present path. A request goes in once the composite
+/// of the present before the target has begun; a shot can still land later (adjacent frames, or
+/// a composite that had not reached its check), so each entry names the present it shows. The
+/// renderer's callback thread encodes and writes the file.
+class ClipCaptures {
+public:
+    ClipCaptures(ToolState& state, std::vector<u64> frames, u64 clip_present)
+        : renderer{state.system.GPU().Renderer()},
+          directory{state.dump_directory / fmt::format("clip-{}-{:03}", state.session, ++state.clips)} {
+        std::filesystem::create_directories(directory);
+        for (const u64 frame : frames) {
+            shots.push_back({.frame = frame, .target = clip_present + frame, .present = {},
+                             .written = {}});
+        }
+    }
+
+    /// From the wait loop: notes the present of a finished shot, then requests the next one.
+    void Poll() {
+        if (pending) {
+            if (renderer.IsScreenshotPending()) {
+                return;
+            }
+            shots[*pending].present = renderer.ScreenshotPresent();
+            pending.reset();
+        }
+        if (next == shots.size() || renderer.IsScreenshotPending() ||
+            g_nx2_composite_present.load(std::memory_order_acquire) + 1 < shots[next].target) {
+            return;
+        }
+        Shot& shot = shots[next];
+        const auto layout = Layout::DefaultFrameLayout(1280, 720);
+        const auto pixels = std::make_shared<std::vector<u8>>(size_t{layout.width} * layout.height * 4);
+        const auto done = std::make_shared<std::promise<std::string>>();
+        shot.written = done->get_future();
+        const auto path = directory / fmt::format("frame-{:05}.png", shot.frame);
+        renderer.RequestScreenshot(
+            pixels->data(),
+            [pixels, done, layout, path](bool invert_y) {
+                try {
+                    const std::vector<u8> png = ScreenshotPng(*pixels, layout, invert_y);
+                    std::ofstream file{path, std::ios::binary};
+                    file.write(reinterpret_cast<const char*>(png.data()),
+                               static_cast<std::streamsize>(png.size()));
+                    done->set_value(file ? path.generic_string() : "");
+                } catch (const std::exception&) {
+                    done->set_value("");
+                }
+            },
+            layout);
+        pending = next++;
+    }
+
+    /// Requests and waits for the rest, up to timeout, and returns
+    /// [{frame, target_present, present, path}]; a shot that did not finish has an error instead.
+    json Finish(const ToolState& state, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while ((pending || next < shots.size()) && std::chrono::steady_clock::now() < deadline &&
+               !state.stopping.load(std::memory_order_relaxed)) {
+            Poll();
+            std::this_thread::sleep_for(1ms);
+        }
+        json list = json::array();
+        for (Shot& shot : shots) {
+            json entry = {{"frame", shot.frame}, {"target_present", shot.target}};
+            const bool written =
+                shot.written.valid() && shot.present &&
+                shot.written.wait_until(deadline) == std::future_status::ready;
+            const std::string path = written ? shot.written.get() : "";
+            if (!path.empty()) {
+                entry["present"] = *shot.present;
+                entry["path"] = path;
+            } else {
+                entry["error"] = !shot.written.valid() ? "not requested: no composite reached it in time"
+                                 : written             ? "the file could not be written"
+                                                       : "the screenshot did not finish in time";
+            }
+            list.push_back(std::move(entry));
+        }
+        std::ofstream{directory / "captures.json"} << list.dump(1) << '\n';
+        return list;
+    }
+
+    [[nodiscard]] std::string Directory() const {
+        return directory.generic_string();
+    }
+
+private:
+    struct Shot {
+        u64 frame;
+        u64 target;
+        std::optional<u64> present;
+        std::future<std::string> written;
+    };
+    VideoCore::RendererBase& renderer;
+    std::filesystem::path directory;
+    std::vector<Shot> shots;
+    size_t next{};
+    std::optional<size_t> pending;
+};
+
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
 /// the next present on, and returns once they are done. The injector stops by itself after the
 /// last step; leaving this function by any path removes it. The first clip_offset frames are a
@@ -1035,6 +1167,17 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     const bool npad_sync = params.value("npad_sync", kit_hooks);
     if (npad_sync) {
         RequireKitHooks("npad_sync");
+    }
+    std::vector<u64> capture_frames;
+    if (params.contains("capture_frames")) {
+        if (timed) {
+            throw std::runtime_error{"capture_frames needs frame steps, not ms"};
+        }
+        capture_frames = ClipFrames(params.at("capture_frames"), total - clip_offset,
+                                    MAX_CAPTURE_FRAMES, "capture_frames");
+        if (state.system.IsPaused()) {
+            throw std::runtime_error{"paused: capture_frames needs presents; resume first"};
+        }
     }
     const auto picked = InputController(state);
     HID::EmulatedController* const controller = picked.first;
@@ -1107,8 +1250,15 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     }
     const auto deadline = begin + std::chrono::seconds{timeout};
     const auto timed_end = begin + std::chrono::milliseconds{timed ? total : 0};
+    std::optional<ClipCaptures> captures;
+    if (!capture_frames.empty()) {
+        captures.emplace(state, std::move(capture_frames), start + clip_offset);
+    }
     u64 now = start - 1;
     for (;;) {
+        if (captures) {
+            captures->Poll();
+        }
         now = g_nx2_present_count.load(std::memory_order_relaxed);
         if (timed ? std::chrono::steady_clock::now() >= timed_end : now >= start + total) {
             break;
@@ -1129,7 +1279,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
                       : (now >= start ? now - start : 0),
                 total, timed ? "ms passed" : "frames were presented", timeout)};
         }
-        std::this_thread::sleep_for(timed ? 1ms : 2ms);
+        std::this_thread::sleep_for(timed || captures ? 1ms : 2ms);
     }
     // Timed: the presents that began inside the window, except the last, whose timestamp may
     // still be pending. The count was read after the window ended, so drop presents stamped later.
@@ -1150,6 +1300,10 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         {"elapsed_s",
          std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()},
     };
+    if (captures) {
+        result["capture_dir"] = captures->Directory();
+        result["captures"] = captures->Finish(state, 5s);
+    }
     if (timed) {
         result["ms"] = total;
         result["clock"] = "host_time";
@@ -1858,7 +2012,7 @@ json Features(ToolState&, const json&) {
                    {"input_ms", "measure", "input_record", "record_mode", "start_present",
                     "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                     "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                    "pre_roll"}},
+                    "pre_roll", "capture_frames"}},
                   {"kit", 2},
                   {"kit_hooks", true}};
     }

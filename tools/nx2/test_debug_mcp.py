@@ -158,6 +158,7 @@ class AdapterTest(unittest.TestCase):
         sequence = {"steps": [{"frames": 300}, {"frames": 300, "buttons": ["A"]}]}
         self.assertEqual(debug_mcp.default_timeout("input_sequence", sequence), 40)
         self.assertEqual(debug_mcp.default_timeout("input_sequence", dict(sequence, pre_roll=[{"frames": 600}])), 70)
+        self.assertEqual(debug_mcp.default_timeout("input_sequence", dict(sequence, capture_frames=[5])), 46)
         self.assertEqual(debug_mcp.default_timeout("status", {}), 5)
         result = self.call("input_sequence", sequence)
         self.assertFalse(result["isError"])
