@@ -77,6 +77,8 @@ constexpr size_t MAX_CAPTURE_FRAMES = 32;
 constexpr size_t MAX_SCAN_HITS = 2'000'000;
 /// Hits one scan_memory list call returns at most.
 constexpr size_t MAX_SCAN_LIST = 1000;
+/// Addresses one input_sequence watch reads at each present.
+constexpr size_t MAX_WATCH = 8;
 
 constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
     {"A", HID::NpadButton::A},         {"B", HID::NpadButton::B},
@@ -774,9 +776,12 @@ std::string_view ScanTypeName(ScanType type) {
     return names[static_cast<size_t>(type)];
 }
 
-/// A value of type as JSON: a number, or "nan", "inf" or "-inf".
+/// A value of type as JSON: an integer, a float, or "nan", "inf" or "-inf".
 json ScanJson(ScanType type, u64 bits) {
     const double value = ScanValue(type, bits);
+    if (type != ScanType::F32 && type != ScanType::F64) {
+        return static_cast<s64>(value);
+    }
     if (std::isnan(value)) {
         return "nan";
     }
@@ -1180,6 +1185,48 @@ ReplaySync& GetReplaySync() {
     return sync;
 }
 
+/// input_sequence watch while it runs: active is the one check the reply hook makes otherwise.
+struct PresentWatch {
+    std::atomic<bool> active{};
+    std::mutex mutex;
+    std::optional<ValueWatch> watch;
+};
+
+PresentWatch& GetPresentWatch() {
+    static PresentWatch watch;
+    return watch;
+}
+
+/// Reply hook part of a watch: reads the watched values at the present's reply.
+void WatchPresent(u64 present) {
+    PresentWatch& watch = GetPresentWatch();
+    KitLock lock{watch.mutex, "watch mutex", __func__};
+    if (watch.watch) {
+        watch.watch->Sample(present);
+    }
+}
+
+/// watch: [{address, as}] for the frame-step call over presents [start, end).
+std::vector<std::pair<u64, ScanType>> ParseWatch(const json& list) {
+    if (!list.is_array() || list.empty() || list.size() > MAX_WATCH) {
+        throw std::runtime_error{fmt::format("watch must be an array of 1 to {} {{address, as}}", MAX_WATCH)};
+    }
+    std::vector<std::pair<u64, ScanType>> addresses;
+    for (const json& entry : list) {
+        if (!entry.is_object() || !entry.contains("address") || !entry.contains("as")) {
+            throw std::runtime_error{"a watch entry is {address, as}"};
+        }
+        const ScanType type = ParseScanType(entry.at("as").get<std::string>());
+        const u64 address = AddressParam(entry, "address");
+        if (address % ScanSize(type) != 0) {
+            throw std::runtime_error{fmt::format("watch address {:#x} is not aligned to its {} bytes",
+                                                 address, ScanSize(type))};
+        }
+        addresses.emplace_back(address, type);
+    }
+    return addresses;
+}
+
 /// Reply hook part of a replay: notes present when the last npad update started before its count.
 /// True when the replay wants the npad updated at this reply.
 bool NoteReplayReply(u64 present) {
@@ -1366,6 +1413,14 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     if (npad_sync) {
         RequireKitHooks("npad_sync");
     }
+    std::vector<std::pair<u64, ScanType>> watched;
+    if (params.contains("watch")) {
+        if (timed) {
+            throw std::runtime_error{"watch needs frame steps, not ms"};
+        }
+        RequireKitHooks("watch");
+        watched = ParseWatch(params.at("watch"));
+    }
     std::vector<u64> capture_frames;
     if (params.contains("capture_frames")) {
         if (timed) {
@@ -1402,6 +1457,20 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     GetWatchdog().Ensure();
     SCOPE_EXIT {
         input_calls.fetch_sub(1, std::memory_order_relaxed);
+    };
+    if (!watched.empty()) {
+        PresentWatch& watch = GetPresentWatch();
+        KitLock lock{watch.mutex, "watch mutex", __func__};
+        watch.watch.emplace(Application(state).GetMemory(), std::move(watched), start, start + total);
+        watch.active.store(true, std::memory_order_release);
+    }
+    SCOPE_EXIT {
+        PresentWatch& watch = GetPresentWatch();
+        if (watch.active.load(std::memory_order_relaxed)) {
+            watch.active.store(false, std::memory_order_release);
+            KitLock lock{watch.mutex, "watch mutex", __func__};
+            watch.watch.reset();
+        }
     };
     if (!timed && kit_hooks) {
         ReplaySync& sync = GetReplaySync();
@@ -1501,6 +1570,10 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     if (captures) {
         result["capture_dir"] = captures->Directory();
         result["captures"] = captures->Finish(state, 5s);
+    }
+    if (PresentWatch& watch = GetPresentWatch(); watch.active.load(std::memory_order_relaxed)) {
+        KitLock lock{watch.mutex, "watch mutex", __func__};
+        result["watch"] = watch.watch->Json();
     }
     if (timed) {
         result["ms"] = total;
@@ -1878,6 +1951,9 @@ void PresentReply(u64 present) {
         in_forced_npad_update = false;
     }
     RecordPresentReply(present);
+    if (GetPresentWatch().active.load(std::memory_order_relaxed)) {
+        WatchPresent(present);
+    }
     if (const auto trace = reply_trace.load(std::memory_order_acquire)) {
         trace(present);
     }
@@ -2210,7 +2286,7 @@ json Features(ToolState&, const json&) {
                    {"input_ms", "measure", "input_record", "record_mode", "start_present",
                     "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                     "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                    "pre_roll", "capture_frames", "scan_memory"}},
+                    "pre_roll", "capture_frames", "scan_memory", "watch"}},
                   {"kit", 2},
                   {"kit_hooks", true}};
     }
@@ -2542,6 +2618,46 @@ void RefineScan(Memory::Memory& memory, ScanList& list, ScanTest test) {
     }
     list.addresses.resize(kept);
     list.values.resize(kept);
+}
+
+ValueWatch::ValueWatch(Memory::Memory& memory_, std::vector<std::pair<u64, ScanType>> addresses_,
+                       u64 start_, u64 end_)
+    : memory{&memory_}, addresses{std::move(addresses_)}, start{start_}, end{end_} {
+    presents.reserve(end - start);
+    values.reserve((end - start) * addresses.size());
+}
+
+void ValueWatch::Sample(u64 present) {
+    if (present < start || present >= end || (!presents.empty() && present <= presents.back())) {
+        return;
+    }
+    presents.push_back(present);
+    for (const auto& [address, type] : addresses) {
+        const u8* const source = GuestByte(*memory, address);
+        u64 bits = 0;
+        if (source != nullptr) {
+            std::memcpy(&bits, source, ScanSize(type));
+        }
+        values.push_back(source != nullptr ? std::optional{bits} : std::nullopt);
+    }
+}
+
+json ValueWatch::Json() const {
+    json list = json::array();
+    for (const auto& [address, type] : addresses) {
+        list.push_back({{"address", HexAddress(address)}, {"as", ScanTypeName(type)}});
+    }
+    json rows = json::array();
+    for (size_t row = 0; row < presents.size(); ++row) {
+        json line = json::array({presents[row]});
+        for (size_t column = 0; column < addresses.size(); ++column) {
+            const auto& value = values[row * addresses.size() + column];
+            line.push_back(value ? ScanJson(addresses[column].second, *value) : json(nullptr));
+        }
+        rows.push_back(std::move(line));
+    }
+    return {{"addresses", std::move(list)}, {"read_at", "reply"}, {"presents", end - start},
+            {"sampled", presents.size()}, {"rows", std::move(rows)}};
 }
 
 InputStep ParseInputStep(const json& step) {

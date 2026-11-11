@@ -459,6 +459,65 @@ TEST_CASE("Memory scans keep typed hits and refine them by their change",
     REQUIRE(expired.addresses.empty());
 }
 
+TEST_CASE("Value watches read their addresses once per present of the call",
+          "[core][nx2_debug_server]") {
+    using Core::Nx2Debug::ScanType;
+    GuestPages guest;
+    float facing = 97.0f;
+    std::memcpy(guest.backing + 0x1010, &facing, sizeof(facing)); // guest 0x4010
+    const u16 angle = 0x8000;
+    std::memcpy(guest.backing + 0x3000, &angle, sizeof(angle)); // guest 0x8000
+    Core::Nx2Debug::ValueWatch watch{guest.process.GetMemory(),
+                                     {{0x4010, ScanType::F32}, {0x6000, ScanType::U32},
+                                      {0x8000, ScanType::U16}},
+                                     10, 14};
+    watch.Sample(9);
+    watch.Sample(10);
+    facing = 243.0f;
+    std::memcpy(guest.backing + 0x1010, &facing, sizeof(facing));
+    watch.Sample(11);
+    watch.Sample(11);
+    watch.Sample(13);
+    watch.Sample(14);
+    const json result = watch.Json();
+    REQUIRE(result["addresses"][0] == json{{"address", "0x4010"}, {"as", "f32"}});
+    REQUIRE(result["presents"] == 4);
+    REQUIRE(result["sampled"] == 3);
+    // Page 6 is not mapped: its value is null.
+    REQUIRE(result["rows"] == json{{10, 97.0, nullptr, 32768}, {11, 243.0, nullptr, 32768},
+                                   {13, 243.0, nullptr, 32768}});
+}
+
+TEST_CASE("Watches name at most 8 aligned addresses, frame steps only", "[core][nx2_debug_server]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& controller = *system.HIDCore().GetEmulatedController(Core::HID::NpadIdType::Player1);
+    controller.SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
+    controller.Connect();
+    const auto refusal = [&system](const json& watch, const json& steps = {{{"frames", 10}}}) -> std::string {
+        try {
+            static_cast<void>(Core::Nx2Debug::CallTool(system, "input_sequence",
+                                                       {{"steps", steps}, {"watch", watch}}));
+        } catch (const std::exception& error) {
+            return error.what();
+        }
+        return {};
+    };
+    const json one = {{{"address", "0x4010"}, {"as", "f32"}}};
+    json nine = json::array();
+    for (int i = 0; i < 9; ++i) {
+        nine.push_back({{"address", 0x4000 + i * 4}, {"as", "u32"}});
+    }
+    using Catch::Matchers::ContainsSubstring;
+    REQUIRE_THAT(refusal(one, {{{"ms", 50}}}), ContainsSubstring("needs frame steps"));
+    REQUIRE_THAT(refusal(nine), ContainsSubstring("1 to 8"));
+    REQUIRE_THAT(refusal({{{"address", "0x4011"}, {"as", "f32"}}}), ContainsSubstring("not aligned"));
+    REQUIRE_THAT(refusal({{{"address", "0x4010"}, {"as", "s16"}}}), ContainsSubstring("want u8"));
+    REQUIRE_THAT(refusal({{{"as", "u8"}}}), ContainsSubstring("{address, as}"));
+    REQUIRE_THAT(refusal(one), ContainsSubstring("no application process"));
+    REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
+}
+
 TEST_CASE("scan_memory checks its parameters before it reads memory", "[core][nx2_debug_server]") {
     ScopedSystemTestContext context;
     Core::System system;
@@ -1203,7 +1262,7 @@ TEST_CASE("Debug server features name what this build supports", "[core][nx2_deb
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
                    "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                    "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                   "pre_roll", "capture_frames", "scan_memory"}},
+                   "pre_roll", "capture_frames", "scan_memory", "watch"}},
                  {"kit", 2},
                  {"kit_hooks", true}});
 }
@@ -1439,6 +1498,8 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
     REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}},
                                        {"start_present", Core::g_nx2_present_count.load() + 100}}));
     REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", true}}));
+    REQUIRE(refused("input_sequence",
+                    {{"steps", {{{"frames", 1}}}}, {"watch", {{{"address", "0x4000"}, {"as", "u32"}}}}}));
     REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==

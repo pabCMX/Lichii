@@ -124,6 +124,29 @@ struct ScanList {
 /// whose page is no longer mapped leaves.
 void RefineScan(Memory::Memory& memory, ScanList& list, ScanTest test);
 
+/// input_sequence watch: the values of some addresses at each present of [start, end), read by
+/// the present reply hook.
+class ValueWatch {
+public:
+    ValueWatch(Memory::Memory& memory, std::vector<std::pair<u64, ScanType>> addresses, u64 start,
+               u64 end);
+
+    /// Reads every address at present. A present outside [start, end), or not after the last
+    /// one sampled, is ignored.
+    void Sample(u64 present);
+    /// {addresses: [{address, as}], read_at, presents, sampled, rows: [[present, value, ...]]};
+    /// a value whose page was not mapped is null.
+    [[nodiscard]] nlohmann::json Json() const;
+
+private:
+    Memory::Memory* memory;
+    std::vector<std::pair<u64, ScanType>> addresses;
+    u64 start;
+    u64 end;
+    std::vector<u64> presents;
+    std::vector<std::optional<u64>> values;
+};
+
 /// One step of input or input_sequence: what to hold, for how many presented frames, or for how
 /// many milliseconds of host time (ms != 0, frames == 0).
 struct InputStep {
