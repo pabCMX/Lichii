@@ -187,7 +187,11 @@ at the next present), so a client reads `features` first. An exe without the met
 `input_record`, `record_mode` (`mode` any or sample), `start_present`, `landed_present`,
 `screenshot_present`, `luma_watch` and `npad_sync`, and with the trainer kit `pause`,
 `step_frames`, `time_control`, `time_trace` (`time_control {trace}`) and `switches`
-(trainer-kit.md). With the trainer kit and an Ocarina boot with `EDEN_NX2_OOT_TIME_CONTROL=1`, the
+(trainer-kit.md), and with the kit tools of 2026-11-11 `record_anchor` and `pre_roll` ("Recorder
+pre-roll"), `capture_frames` ("Screenshots at clip frames"), `scan_memory` ("Memory scan") and
+`watch` ("Game values at each present"). With `EDEN_NX2_KIT_HOOKS=0`, `record_anchor` and
+`watch` are left out with the other hook features; `pre_roll`, `capture_frames` and
+`scan_memory` stay. With the trainer kit and an Ocarina boot with `EDEN_NX2_OOT_TIME_CONTROL=1`, the
 reply also has `time_control_block`, the guest address of the time control block. `kit` is 2 (since `npad_sync`) and rises when the contract of a listed feature
 changes. `status` stays as origin's.
 
@@ -844,7 +848,8 @@ kit's hooks: `input_record`, `luma_watch`, `start_present` and an explicit `npad
 with an error that names the variable, frame-step calls run without the reply hook (no
 `npad_sync`, no `stale_presents`), the GPU does not store the composite present, the trainer's
 step trace (`time_control {trace}`) is refused, and `features` answers `{features: ["input_ms",
-"measure"]` plus the trainer methods but not `time_trace`, `kit, kit_hooks: false}`. Plain `input` and
+"measure"]` plus the trainer methods but not `time_trace`, and `pre_roll`, `capture_frames` and
+`scan_memory`, `kit, kit_hooks: false}`. `record_anchor` and `watch` are refused. Plain `input` and
 `input_sequence` still work: their injector is origin code. One relaunch with it tells whether a
 hang or a slowdown comes from the kit.
 
