@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <chrono>
-#include <exception>
 
 #include <QPainter>
 
-#include "common/logging.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "lichii/bootmanager.h"
 #include "lichii/render/trainer_overlay.h"
@@ -39,7 +37,7 @@ void Follow(StickTrail& trail, TrailPoint& last, s32 x, s32 y, s64 now_ms) {
 bool SameInput(const TrainerHud::InputFrame& a, const TrainerHud::InputFrame& b) {
     return a.buttons == b.buttons && a.left_x == b.left_x && a.left_y == b.left_y &&
            a.right_x == b.right_x && a.right_y == b.right_y && a.recording == b.recording &&
-           a.recorded == b.recorded && a.replaying == b.replaying;
+           a.recorded == b.recorded && a.record_full == b.record_full && a.replaying == b.replaying;
 }
 
 } // Anonymous namespace
@@ -69,7 +67,6 @@ void TrainerOverlay::SetWanted(bool wanted_) {
     }
     left_trail.Clear();
     right_trail.Clear();
-    record_start.reset();
     timer.start();
     Tick();
 }
@@ -131,21 +128,6 @@ void TrainerOverlay::ReadInput() {
     left_trail.Expire(now, TrainerHud::TRAIL_MS);
     right_trail.Expire(now, TrainerHud::TRAIL_MS);
 
-    if (!view.recording) {
-        record_start.reset();
-    } else if (!record_start) {
-        // Once per recording; a recording that ended meanwhile is read again at the next tick.
-        try {
-            const auto status = Core::Nx2Debug::RecordInput(system, "status");
-            if (status["recording"].get<bool>()) {
-                record_start = status["start_present"].get<u64>();
-            }
-        } catch (const std::exception& error) {
-            LOG_WARNING(Frontend, "Trainer overlay: input_record status: {}", error.what());
-            record_start = view.present + 1;
-        }
-    }
-
     frame.buttons = view.buttons;
     frame.left_x = view.left.x;
     frame.left_y = view.left.y;
@@ -153,8 +135,8 @@ void TrainerOverlay::ReadInput() {
     frame.right_y = view.right.y;
     frame.now_ms = now;
     frame.recording = view.recording;
-    frame.recorded =
-        record_start && view.present >= *record_start ? view.present - *record_start + 1 : 0;
+    frame.recorded = view.recorded;
+    frame.record_full = view.record_full;
     frame.replaying = view.replaying;
 }
 

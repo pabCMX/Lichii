@@ -57,3 +57,67 @@ TEST_CASE("The trainer overlay reads what the game is given from both controller
     REQUIRE(view.left.x == 20000);
     REQUIRE(view.right.y == 30000);
 }
+
+TEST_CASE("The trainer overlay's REC count is the recorder's own", "[core][nx2_debug_server]") {
+    using namespace Core::HID;
+    ScopedSystemTestContext context;
+    Core::System system;
+    auto& player1 = *system.HIDCore().GetEmulatedController(NpadIdType::Player1);
+    player1.SetNpadStyleIndex(NpadStyleIndex::Fullkey);
+    player1.Connect();
+    // A stick that moves at every present, so each present is its own step.
+    player1.SetInputInjector([] {
+        const auto x = s32(Core::g_nx2_present_count.load() % 20000);
+        return std::optional{
+            InjectedInput{.buttons = {}, .left = AnalogStickState{.x = x, .y = 0}, .right = {}}};
+    });
+    const u64 old_count = Core::g_nx2_present_count.load();
+    const auto record = [&](const char* action) {
+        return Core::Nx2Debug::CallTool(system, "input_record", {{"action", action}});
+    };
+    SCOPE_EXIT {
+        if (Core::Nx2Debug::ReadGamePad(system).recording) {
+            static_cast<void>(record("stop"));
+        }
+        player1.SetInputInjector({});
+        player1.Disconnect();
+        Core::g_nx2_present_count = old_count;
+    };
+    const auto present = [] {
+        const u64 count = ++Core::g_nx2_present_count;
+        if (const auto hook = Core::g_nx2_present_hook.load()) {
+            hook(count);
+        }
+        if (const auto reply = Core::g_nx2_present_reply_hook.load()) {
+            reply(count);
+        }
+    };
+
+    static_cast<void>(record("start"));
+    for (int i = 0; i < 3; ++i) {
+        present();
+    }
+    auto view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.recording);
+    REQUIRE(view.recorded == record("status")["presents"].get<u64>());
+    REQUIRE(view.recorded == 3);
+
+    // A stop and a start between two samples: the count is the new recording's.
+    static_cast<void>(record("stop"));
+    static_cast<void>(record("start"));
+    present();
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.recorded == 1);
+    REQUIRE_FALSE(view.record_full);
+
+    // Past its step limit the recorder stops counting, and so does the mark.
+    for (int i = 0; i < 6100; ++i) {
+        present();
+    }
+    view = Core::Nx2Debug::ReadGamePad(system);
+    REQUIRE(view.record_full);
+    REQUIRE(view.recorded == record("status")["presents"].get<u64>());
+    const u64 full_at = view.recorded;
+    present();
+    REQUIRE(Core::Nx2Debug::ReadGamePad(system).recorded == full_at);
+}

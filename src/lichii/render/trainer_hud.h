@@ -28,6 +28,7 @@ struct InputFrame {
     s64 now_ms{}; ///< the trails' clock now
     bool recording{};
     u64 recorded{}; ///< presents recorded so far
+    bool record_full{};
     bool replaying{};
 };
 

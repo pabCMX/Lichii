@@ -4,7 +4,6 @@
 #pragma once
 
 #include <functional>
-#include <optional>
 
 #include <QImage>
 #include <QTimer>
@@ -58,8 +57,6 @@ private:
     /// The stick positions at the last present.
     TrainerHud::TrailPoint last_left{};
     TrainerHud::TrailPoint last_right{};
-    /// The recording's first present, read once when a recording starts.
-    std::optional<u64> record_start;
     /// The base layer of the input panel at the window's size in device pixels.
     QImage base;
 };

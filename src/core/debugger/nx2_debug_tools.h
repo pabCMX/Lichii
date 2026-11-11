@@ -316,11 +316,13 @@ struct GamePadView {
     HID::AnalogStickState left{};
     HID::AnalogStickState right{};
     bool recording{}; ///< input_record records (Ctrl+F8 or a client)
+    u64 recorded{};   ///< presents recorded so far, as input_record status counts them
+    bool record_full{}; ///< the recording is truncated and records no more
     bool replaying{}; ///< an input or input_sequence call holds input
 };
 
 /// Reads the getters the npad updater and input_record read, on the calling thread. Writes
-/// nothing. While a replay runs they take the injector mutex for a moment.
+/// nothing. While a recording or replay runs it takes their locks for a moment, one at a time.
 [[nodiscard]] GamePadView ReadGamePad(System& system);
 
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
