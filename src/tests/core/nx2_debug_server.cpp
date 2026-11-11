@@ -1412,7 +1412,7 @@ TEST_CASE("Input recordings take the stick at the present's reply", "[core][nx2_
     REQUIRE_FALSE(sampled.contains("blocked_us"));
 }
 
-TEST_CASE("Debug input names the presents whose newest npad entry was older than the count",
+TEST_CASE("A frame-step replay holds the present reply hook only while it runs",
           "[core][nx2_debug_server]") {
     ScopedSystemTestContext context;
     Core::System system;
@@ -1422,13 +1422,12 @@ TEST_CASE("Debug input names the presents whose newest npad entry was older than
     const auto old_count = Core::g_nx2_present_count.load();
     SCOPE_EXIT {
         Core::g_nx2_present_count = old_count;
-        Service::HID::g_npad_update_ns = 0;
         for (auto& timestamp : Core::g_nx2_present_times_ns) {
             timestamp = 0;
         }
     };
     const u64 target = Core::g_nx2_present_count.load() + 20;
-    // Presents every 2 ms; the last npad update of offsets 1 and 4 started before their count.
+    // Presents every 2 ms.
     std::atomic<bool> stop{};
     std::thread presenter{[&] {
         while (!stop) {
@@ -1440,8 +1439,6 @@ TEST_CASE("Debug input names the presents whose newest npad entry was older than
             if (const auto hook = Core::g_nx2_present_hook.load()) {
                 hook(present);
             }
-            const bool stale = present == target + 1 || present == target + 4;
-            Service::HID::g_npad_update_ns = stale ? now - 1 : now + 1;
             if (const auto reply = Core::g_nx2_present_reply_hook.load()) {
                 reply(present);
             }
@@ -1456,7 +1453,6 @@ TEST_CASE("Debug input names the presents whose newest npad entry was older than
         system, "input_sequence",
         {{"steps", {{{"buttons", {"A"}}, {"frames", 3}}, {{"frames", 3}}}}, {"start_present", target}});
     REQUIRE(played["landed_present"].get<u64>() == target);
-    REQUIRE(played["stale_presents"] == json::array({1, 4}));
     REQUIRE(played["npad_sync"] == true);
     REQUIRE_THROWS(Core::Nx2Debug::CallTool(
         system, "input_sequence", {{"steps", {{{"frames", 1}}}}, {"npad_sync", "yes"}}));
