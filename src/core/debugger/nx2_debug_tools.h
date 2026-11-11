@@ -124,6 +124,13 @@ struct ScanList {
 /// whose page is no longer mapped leaves.
 void RefineScan(Memory::Memory& memory, ScanList& list, ScanTest test);
 
+/// capture_frames: whether the screenshot of target may be requested now. g_nx2_composite_present
+/// is set just before each composite, whose screenshot check comes after it, so a request made
+/// once it reached target is taken by that composite or a later one: a shot is never early.
+[[nodiscard]] constexpr bool CaptureDue(u64 composite_present, u64 target_present) {
+    return composite_present >= target_present;
+}
+
 /// input_sequence watch: the values of some addresses at each present of [start, end), read by
 /// the present reply hook.
 class ValueWatch {
