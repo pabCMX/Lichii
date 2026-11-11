@@ -62,4 +62,8 @@ void Publish(std::string_view module, u64 module_address);
 /// The guest address of the control block of the running game, or 0 when it is not installed.
 [[nodiscard]] u64 BlockAddress();
 
+/// Forgets the block and a pending Apply. System calls it at shutdown, so a block address never
+/// outlives its game.
+void Reset();
+
 } // namespace FileSys::OotTimeControl

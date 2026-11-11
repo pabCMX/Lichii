@@ -36,6 +36,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
 #include "core/file_sys/nup_container.h"
+#include "core/file_sys/oot_time_control.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
@@ -688,6 +689,7 @@ struct System::Impl {
             general_channel_context.reset();
         }
         kernel.Shutdown();
+        FileSys::OotTimeControl::Reset();
         stop_event = {};
         Network::RestartSocketOperations();
 

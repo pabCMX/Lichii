@@ -156,4 +156,9 @@ u64 BlockAddress() {
     return g_block.load(std::memory_order_relaxed);
 }
 
+void Reset() {
+    g_pending.store(false, std::memory_order_relaxed);
+    g_block.store(0, std::memory_order_relaxed);
+}
+
 } // namespace FileSys::OotTimeControl
