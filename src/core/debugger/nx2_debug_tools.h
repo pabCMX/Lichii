@@ -306,6 +306,23 @@ struct Png {
 /// Whether a debug server runs now. The frontend's input recording hotkey is off otherwise.
 [[nodiscard]] bool IsServiceRunning();
 
+/// What the trainer overlay shows: the input the game is given now, from the pad or a replay, and
+/// what the kit does with it.
+struct GamePadView {
+    u64 present{}; ///< g_nx2_present_count at the read
+    /// Every npad button of the connected player 1 and handheld controllers, ORed.
+    HID::NpadButton buttons{};
+    /// Per stick, the larger deflection of the two, after the deadzone and range settings.
+    HID::AnalogStickState left{};
+    HID::AnalogStickState right{};
+    bool recording{}; ///< input_record records (Ctrl+F8 or a client)
+    bool replaying{}; ///< an input or input_sequence call holds input
+};
+
+/// Reads the getters the npad updater and input_record read, on the calling thread. Writes
+/// nothing. While a replay runs they take the injector mutex for a moment.
+[[nodiscard]] GamePadView ReadGamePad(System& system);
+
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
 [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,
                                                          u64 program_id);
