@@ -19,6 +19,7 @@
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "core/device_memory.h"
+#include "core/file_sys/oot_time_control.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
@@ -1527,6 +1528,10 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
     REQUIRE(refused("input_sequence", {{"steps", {{{"frames", 1}}}}, {"capture_frames", {0}}}));
     REQUIRE(Core::g_nx2_present_hook.load() == nullptr);
     REQUIRE(Core::g_nx2_present_reply_hook.load() == nullptr);
+    // Tests run in random order, and an earlier one may leave a time control block published.
+    // The first Publish takes what an earlier Apply left pending, the second clears.
+    FileSys::OotTimeControl::Publish("main", 0);
+    FileSys::OotTimeControl::Publish("main", 0);
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
             json{{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
                                "pre_roll", "scan_memory"}},
