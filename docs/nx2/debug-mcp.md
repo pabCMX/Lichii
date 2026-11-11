@@ -356,6 +356,48 @@ How the reads are safe:
   flush the GPU caches, so the result is what guest memory holds, not data that is still only in
   GPU buffers.
 
+### Memory scan (implemented)
+
+`search_memory` finds only an exact byte pattern, so it cannot find a value that is not known
+exactly, such as Link's position or facing. **`scan_memory`** is a typed search with a kept hit
+list, as in a cheat engine:
+
+| Call | What it does |
+| --- | --- |
+| `{action: "first", type, value}` or `{action: "first", type, min, max}` | Scans the game's writable memory for values of `type` equal to `value`, or from `min` to `max` (inclusive), and keeps the hits with their values. Replaces an earlier list. Optional `regions` and `budget_ms`. |
+| `{action: "refine", op, value?, min?, max?}` | Keeps the hits that pass `op`, and keeps their value now for the next refine. `op` is `changed`, `unchanged`, `increased`, `decreased` (against the kept value), `equal` (`value`) or `range` (`min`, `max`). |
+| `{action: "list", limit?, offset?}` | `hits: [{address, kept, now}]` from `offset` on, at most `limit` (default 100, at most 1000). `now` is missing when the page is no longer mapped. |
+| `{action: "drop"}` | Frees the list: `{dropped: <count>}`. |
+
+- `type` is `u8`, `u16`, `u32`, `i32`, `f32` or `f64`, little endian. Values are read only at
+  addresses aligned to their size. An integer `value`, `min` or `max` must be whole. An `f32`
+  value is rounded to f32 first, so `equal` matches the stored float exactly. A NaN never passes
+  `equal`, `range`, `increased` or `decreased`.
+- `regions`: `both` (default), `heap` or `data`. They come from the kernel's memory blocks
+  (`QueryInfo`), only blocks with write permission: `heap` is state Normal (the game's heap),
+  `data` is CodeData and AliasCodeData (the `.data` and `.bss` of the main module and its
+  libraries). The first reply names them: `ranges` (start and end of each), `region_bytes` and
+  `scanned_bytes` (the mapped bytes read).
+- The list keeps at most 2,000,000 hits (16 bytes each, 32 MB). A first scan that finds more
+  stops there with `truncated: true`: the addresses after the last hit were not looked at, so
+  narrow the range or the region and scan again. A first scan stops after `budget_ms` (default
+  30000, at most 60000) with `complete: false`.
+- Every reply has `type`, `count`, `truncated`, `complete` and `max_hits`; a refine also `before`.
+- The list is one per process, kept between calls and freed when the game stops. The scan reads
+  memory while the game runs, as `read_memory` does, and holds the server while it scans. Its
+  time on the PC is not measured yet: the first reply has `elapsed_ms`. It costs nothing when
+  not called.
+
+Example, Link's facing (assume an f32 in degrees or radians; try `u16` for a binary angle):
+
+```
+scan_memory {action: "first", type: "f32", min: -10000, max: 10000}
+(turn Link)      scan_memory {action: "refine", op: "changed"}
+(stand still)    scan_memory {action: "refine", op: "unchanged"}
+(turn right)     scan_memory {action: "refine", op: "increased"}   or "decreased"
+scan_memory {action: "list", limit: 50}
+```
+
 ### Input (implemented)
 
 **`input`** `{buttons?, left_stick?, right_stick?, frames, timeout_s?, measure?}` holds the buttons and

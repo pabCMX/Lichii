@@ -85,6 +85,45 @@ struct GuestSearch {
                                             u64 start, u64 end, size_t max_hits,
                                             std::chrono::steady_clock::time_point deadline);
 
+/// scan_memory's value types, little endian, each at addresses aligned to its size.
+enum class ScanType : u8 { U8, U16, U32, I32, F32, F64 };
+
+/// A scan's test: Equal (low == high, the value) and Range (low to high, inclusive) compare the
+/// value now; the others compare it with the value kept at the last scan.
+enum class ScanOp : u8 { Equal, Range, Changed, Unchanged, Increased, Decreased };
+struct ScanTest {
+    ScanOp op;
+    double low{};
+    double high{};
+};
+
+/// scan_memory's kept hit list: each address with its raw bits at the last scan.
+struct ScanList {
+    ScanType type;
+    std::vector<u64> addresses;
+    std::vector<u64> values;
+    /// The first scan stopped at max_hits; addresses after the last hit were not looked at.
+    bool truncated{};
+    /// The first scan stopped at the deadline (false); the list has the hits up to then.
+    bool complete{true};
+    u64 scanned{};
+};
+
+[[nodiscard]] size_t ScanSize(ScanType type);
+/// The value of raw little-endian bits of type, as a double (exact for every type here).
+[[nodiscard]] double ScanValue(ScanType type, u64 bits);
+
+/// The first scan: every aligned value of type in the mapped pages of the [start, end) ranges that
+/// passes test (Equal or Range). Stops at max_hits (truncated) or the deadline (not complete).
+[[nodiscard]] ScanList ScanGuestMemory(Memory::Memory& memory,
+                                       std::span<const std::pair<u64, u64>> ranges, ScanType type,
+                                       ScanTest test, size_t max_hits,
+                                       std::chrono::steady_clock::time_point deadline);
+
+/// Keeps the hits whose value now passes test, and keeps that value for the next refine. A hit
+/// whose page is no longer mapped leaves.
+void RefineScan(Memory::Memory& memory, ScanList& list, ScanTest test);
+
 /// One step of input or input_sequence: what to hold, for how many presented frames, or for how
 /// many milliseconds of host time (ms != 0, frames == 0).
 struct InputStep {
