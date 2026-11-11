@@ -128,6 +128,12 @@ land on other game frames.
 `{name, env, class, on}`; `set` flips them first. An unknown name or a value that is not a
 boolean fails the whole call before anything changes.
 
+**`notify`** `{text, ms?}` shows `text` (at most 500 bytes, line breaks become spaces) in the
+Lichii status bar for `ms` milliseconds (1 to 600000, default 5000) and answers `{shown, ms}` at
+once. The frontend registers it with `SetStatusNotify`; Qt queues `ShowStatusMessage` to the GUI
+thread, as it does the run control. eden-cli registers none, so there the method fails. It is not
+in the `features` list yet: a client that gets "unknown method" has an older exe.
+
 ## Time control
 
 ### Patch

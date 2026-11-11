@@ -386,3 +386,29 @@ TEST_CASE("time_control ramps a speed-up over 2x by doublings, one a present", "
     }
     REQUIRE(TimeRamp(0.0f, 1.0f).empty()); // no earlier speed: nothing to ramp from
 }
+
+TEST_CASE("notify gives the frontend one status bar line and answers at once", "[nx2_trainer]") {
+    ScopedSystemTestContext context;
+    Core::System system;
+    const auto call = [&](const json& params) {
+        return Core::Nx2Debug::CallTool(system, "notify", params);
+    };
+    REQUIRE_THROWS_WITH(call({{"text", "READY"}}), ContainsSubstring("no status bar"));
+
+    std::vector<std::pair<std::string, int>> shown;
+    Core::Nx2Debug::SetStatusNotify(
+        [&](std::string text, int ms) { shown.emplace_back(std::move(text), ms); });
+    SCOPE_EXIT {
+        Core::Nx2Debug::SetStatusNotify({});
+    };
+    REQUIRE(call({{"text", "WAITING: clip starts in 3300 presents"}})["ms"] == 5000);
+    REQUIRE(call({{"text", "two\nlines"}, {"ms", 800}})["shown"] == true);
+    REQUIRE(shown == std::vector<std::pair<std::string, int>>{
+                         {"WAITING: clip starts in 3300 presents", 5000}, {"two lines", 800}});
+
+    REQUIRE_THROWS_WITH(call({{"text", 5}}), ContainsSubstring("text must be a string"));
+    REQUIRE_THROWS_WITH(call({{"text", "x"}, {"ms", 0}}), ContainsSubstring("ms must be"));
+    REQUIRE_THROWS_WITH(call({{"text", std::string(501, 'x')}}), ContainsSubstring("at most 500"));
+    REQUIRE_THROWS_WITH(call({{"text", "x"}, {"colour", "red"}}), ContainsSubstring("unknown key"));
+    REQUIRE(shown.size() == 2);
+}
