@@ -1476,13 +1476,18 @@ TEST_CASE("Input sequences play a pre-roll before the clip", "[core][nx2_debug_s
     FakeNpad npad{controller};
     const u64 recording_start = call("input_record", {{"action", "start"}})["start_present"].get<u64>();
     const u64 target = Core::g_nx2_present_count.load() + 50;
-    const json played = call("input_sequence",
-                             {{"pre_roll", pre_roll}, {"steps", clip}, {"start_present", target}});
+    const json played = call("input_sequence", {{"pre_roll", pre_roll},
+                                                {"steps", clip},
+                                                {"start_present", target},
+                                                {"measure", true}});
     const json recorded = call("input_record", {{"action", "stop"}});
     REQUIRE(played["landed_present"] == target);
     REQUIRE(played["frames"] == 7);
     REQUIRE(played["pre_roll_frames"] == 5);
     REQUIRE(played["clip_present"] == target + 5);
+    // The measurement covers the clip, not the pre-roll.
+    REQUIRE(played["measurement"]["first_present"] == target + 5);
+    REQUIRE(played["measurement"]["last_present"] == target + 6);
     std::vector<Core::HID::InjectedInput> inputs;
     for (const json& step : recorded["steps"]) {
         const auto parsed = Core::Nx2Debug::ParseInputStep(step);
