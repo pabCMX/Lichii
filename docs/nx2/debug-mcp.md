@@ -190,9 +190,9 @@ at the next present), so a client reads `features` first. An exe without the met
 `step_frames`, `time_control`, `time_trace` (`time_control {trace}`) and `switches`
 (trainer-kit.md), and with the kit tools of 2026-11-11 `record_anchor` and `pre_roll` ("Recorder
 pre-roll"), `capture_frames` ("Screenshots at clip frames"), `scan_memory` ("Memory scan") and
-`watch` ("Game values at each present"). With `EDEN_NX2_KIT_HOOKS=0`, `record_anchor`,
-`capture_frames` and `watch` are left out with the other hook features; `pre_roll` and
-`scan_memory` stay. With the trainer kit and an Ocarina boot with `EDEN_NX2_OOT_TIME_CONTROL=1`, the
+`watch` ("Game values at each present"), and `notify` (trainer-kit.md). With `EDEN_NX2_KIT_HOOKS=0`, `record_anchor`,
+`capture_frames` and `watch` are left out with the other hook features; `pre_roll`,
+`scan_memory` and `notify` stay. With the trainer kit and an Ocarina boot with `EDEN_NX2_OOT_TIME_CONTROL=1`, the
 reply also has `time_control_block`, the guest address of the time control block. `kit` is 2 (since `npad_sync`) and rises when the contract of a listed feature
 changes. `status` stays as origin's.
 

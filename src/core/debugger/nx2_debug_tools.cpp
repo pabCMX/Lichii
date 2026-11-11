@@ -2265,7 +2265,7 @@ json Features(ToolState&, const json&) {
     if (!Common::KitStall::HooksEnabled()) {
         result = {{"features",
                    {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
-                    "pre_roll", "scan_memory"}},
+                    "pre_roll", "scan_memory", "notify"}},
                   {"kit", 2},
                   {"kit_hooks", false}};
     } else {
@@ -2273,7 +2273,7 @@ json Features(ToolState&, const json&) {
                    {"input_ms", "measure", "input_record", "record_mode", "start_present",
                     "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                     "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                    "pre_roll", "capture_frames", "scan_memory", "watch"}},
+                    "pre_roll", "capture_frames", "scan_memory", "watch", "notify"}},
                   {"kit", 2},
                   {"kit_hooks", true}};
     }

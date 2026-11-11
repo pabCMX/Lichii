@@ -1282,12 +1282,15 @@ TEST_CASE("Luma watch keeps one sample per composite until it is done", "[core][
 TEST_CASE("Debug server features name what this build supports", "[core][nx2_debug_server]") {
     ScopedSystemTestContext context;
     Core::System system;
+    // Clears a time control block an earlier test may have left (see the KIT_HOOKS=0 test).
+    FileSys::OotTimeControl::Publish("main", 0);
+    FileSys::OotTimeControl::Publish("main", 0);
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
             json{{"features",
                   {"input_ms", "measure", "input_record", "record_mode", "start_present",
                    "landed_present", "screenshot_present", "luma_watch", "npad_sync", "pause",
                    "step_frames", "time_control", "time_trace", "switches", "record_anchor",
-                   "pre_roll", "capture_frames", "scan_memory", "watch"}},
+                   "pre_roll", "capture_frames", "scan_memory", "watch", "notify"}},
                  {"kit", 2},
                  {"kit_hooks", true}});
 }
@@ -1536,7 +1539,7 @@ TEST_CASE("EDEN_NX2_KIT_HOOKS=0 refuses the kit's hook features", "[core][nx2_de
     FileSys::OotTimeControl::Publish("main", 0);
     REQUIRE(Core::Nx2Debug::CallTool(system, "features", json::object()) ==
             json{{"features", {"input_ms", "measure", "pause", "step_frames", "time_control", "switches",
-                               "pre_roll", "scan_memory"}},
+                               "pre_roll", "scan_memory", "notify"}},
                  {"kit", 2},
                  {"kit_hooks", false}});
 }
