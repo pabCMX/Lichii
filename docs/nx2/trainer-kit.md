@@ -304,6 +304,8 @@ the bottom-left of the game image. It is off at start and the state is not saved
   clockwise, so 90 is right. `---` means centred. The magnitude is the length over a full
   deflection, after the deadzone and range settings; only square corners pass 1.00.
 - `REC n` while `input_record` records (Ctrl+F8 or a client), with the presents recorded so far.
+  It is the count `input_record` `status` and `stop` give. While the overlay runs, it also sets
+  the status bar's `REC INPUT n presents` at each change, so both show the same number.
   `REPLAY` while an `input` or `input_sequence` call holds input.
 - Data: `Nx2Debug::ReadGamePad`, the getters the npad updater and `input_record` read, so a replay
   shows too. It is read on a 60 Hz GUI timer that runs only while the overlay is on and can

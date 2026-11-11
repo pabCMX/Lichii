@@ -525,7 +525,7 @@ per game present, so its clips drift when replayed with `input_sequence` (H48).
 | Action | Result |
 | --- | --- |
 | `start` | `{recording: true, start_present, controller, mode: "any", npad_sync: true}`. `mode` may be given, but only as `"any"` (mode `"sample"` was removed in kit 3). Every recording runs one npad update at each present's reply, as replays do. Fails while a recording runs. |
-| `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, mode, truncated, controllers}`, where `steps` is a count. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
+| `status` | `{recording: false, controllers}`, or `{recording: true, start_present, presents, steps, controller, mode, truncated, controllers}`, where `steps` is a count. `presents` is what `stop` would return now: after truncation it no longer counts the open present. `controllers` has one entry for player 1 and one for the handheld controller: `{npad, connected, style, input}`, where `style` is the `NpadStyleIndex` and `input` is true when it gives buttons or a stick now. |
 | `stop` | `{steps: [...], presents, start_present, end_present, controller, mode: "any", npad_sync: true, truncated, steps_at_count, blocked_us: {presents, mean, max}}`. `mode` and `npad_sync` are constants since kit 3; they stay so a saved file says how it was made (a file without `mode` is from mode `"sample"`). Fails when nothing records. The count still running is closed with what it had so far. |
 
 - `controller` is the controller a replay goes to: `player1`, or `handheld` when player 1 is

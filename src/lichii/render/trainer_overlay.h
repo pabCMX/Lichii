@@ -39,6 +39,10 @@ public:
     /// loaded and on show, hide and window state events of the game's windows.
     void Refresh();
 
+signals:
+    /// The REC state it shows changed, so the status bar can show the same count at once.
+    void RecordChanged(bool recording, u64 recorded, bool full);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;

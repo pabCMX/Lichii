@@ -1732,6 +1732,21 @@ json ControllerStates(std::span<HID::EmulatedController* const> controllers) {
     return list;
 }
 
+/// The presents the running recording holds, as stop will return them: the open count only once
+/// it is in the recording, and not after truncation, when the pre-roll ring still opens counts.
+/// status and ReadGamePad (the overlay and the status bar) both count with it. Needs the lock.
+u64 RecordedPresents(const Recorder& recorder) {
+    const bool open_in_recording = recorder.open &&
+                                   recorder.open->present >= recorder.recording->StartPresent() &&
+                                   !recorder.recording->Truncated();
+    return recorder.recording->Presents() + (open_in_recording ? 1 : 0);
+}
+
+/// Whether the running recording is full and records no more. Needs the lock.
+bool RecordFull(const Recorder& recorder) {
+    return recorder.recording->Truncated() || (recorder.at_count && recorder.at_count->Truncated());
+}
+
 void ClearRecordHooks(Recorder& recorder) {
     g_nx2_present_hook.store(nullptr, std::memory_order_release);
     if (recorder.uses_reply_hook) {
@@ -2065,16 +2080,13 @@ json InputRecord(ToolState& state, const json& params) {
         if (!recorder.recording) {
             result = {{"recording", false}, {"controllers", std::move(controllers)}};
         } else {
-            const bool open_in_recording =
-                recorder.open && recorder.open->present >= recorder.recording->StartPresent();
             result = {{"recording", true},
                       {"start_present", recorder.recording->StartPresent()},
-                      {"presents", recorder.recording->Presents() + (open_in_recording ? 1 : 0)},
+                      {"presents", RecordedPresents(recorder)},
                       {"steps", recorder.recording->Steps().size()},
                       {"controller", recorder.controller_name},
                       {"mode", "any"},
-                      {"truncated", recorder.recording->Truncated() ||
-                                        (recorder.at_count && recorder.at_count->Truncated())},
+                      {"truncated", RecordFull(recorder)},
                       {"controllers", std::move(controllers)}};
         }
         if (recorder.pre_roll) {
@@ -2299,14 +2311,8 @@ GamePadView ReadGamePad(System& system) {
         // Not recording_active, which the pre-roll ring sets too.
         view.recording = recorder.recording.has_value();
         if (recorder.recording) {
-            // As stop returns them: the open count only once it is in the recording, and not
-            // after truncation, when the pre-roll ring still opens counts.
-            const bool open_in_recording =
-                recorder.open && recorder.open->present >= recorder.recording->StartPresent() &&
-                !recorder.recording->Truncated();
-            view.recorded = recorder.recording->Presents() + (open_in_recording ? 1 : 0);
-            view.record_full = recorder.recording->Truncated() ||
-                               (recorder.at_count && recorder.at_count->Truncated());
+            view.recorded = RecordedPresents(recorder);
+            view.record_full = RecordFull(recorder);
         }
         if (recorder.pre_roll) {
             // As PreRollStatus counts them.
