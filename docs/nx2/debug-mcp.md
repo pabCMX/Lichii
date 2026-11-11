@@ -493,8 +493,9 @@ at the reply of each covered present, the reply hook runs one npad update itself
 npad lock the 1 ms update takes, and each entry gets the next sampling number, so the game sees
 one more normal entry, the newest, with the present's step. The cost is one npad update per
 present (microseconds), only while a call runs. Side effects: the turbo-button phase advances one
-extra step per present. Since kit 3 there is no switch: a call with an `npad_sync` key fails
-with "npad_sync was removed", and replies do not echo it.
+extra step per present. Since kit 3 there is no switch, and replies do not echo it. An
+`input_sequence` call with an `npad_sync` key fails with "npad_sync was removed"; an `input` call
+refuses it as an unknown step key (`unknown key "npad_sync": want buttons, left_stick, ...`).
 
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
