@@ -1135,8 +1135,8 @@ void PresentReply(u64 present);
 /// only that update's reads as the entry the game reads next.
 thread_local bool in_forced_npad_update = false;
 
-/// g_nx2_present_reply_hook's users (a frame-step replay, a recording in mode "any"): the hook and
-/// the npad update stamps are on only while one runs.
+/// g_nx2_present_reply_hook's users (a frame-step replay, a recording): the hook is on only while
+/// one runs.
 std::mutex reply_hook_mutex;
 int reply_hook_users = 0;
 
@@ -1151,9 +1151,7 @@ void UpdateReplyHook() {
 
 void UseReplyHook() {
     std::scoped_lock lock{reply_hook_mutex};
-    if (reply_hook_users++ == 0) {
-        ::Service::HID::g_npad_update_stamps.store(true, std::memory_order_relaxed);
-    }
+    ++reply_hook_users;
     UpdateReplyHook();
 }
 
@@ -1161,14 +1159,9 @@ void DropReplyHook() {
     std::scoped_lock lock{reply_hook_mutex};
     --reply_hook_users;
     UpdateReplyHook();
-    if (reply_hook_users == 0) {
-        ::Service::HID::g_npad_update_stamps.store(false, std::memory_order_relaxed);
-    }
 }
 
-/// The frame-step replay running now, for the reply hook: the presents it covers, and the offsets
-/// from its start whose newest npad entry at the reply was written before the present was counted
-/// (the game then reads the previous step once more).
+/// The frame-step replay running now, for the reply hook: the presents it covers.
 struct ReplaySync {
     std::mutex mutex;
     bool active{};
@@ -1179,7 +1172,6 @@ struct ReplaySync {
     u64 end{};
     /// The clip's first present: start plus the pre-roll's frames (start without a pre-roll).
     u64 clip{};
-    std::vector<u64> stale;
 };
 
 ReplaySync& GetReplaySync() {
@@ -1213,21 +1205,11 @@ std::vector<std::pair<u64, ScanType>> ParseWatch(const json& list) {
     return addresses;
 }
 
-/// Reply hook part of a replay: notes present when the last npad update started before its count.
-/// True when the replay wants the npad updated at this reply.
+/// Reply hook part of a replay: true when the replay wants the npad updated at this reply.
 bool NoteReplayReply(u64 present) {
     ReplaySync& sync = GetReplaySync();
     KitLock lock{sync.mutex, "replay sync mutex", __func__};
-    if (!sync.active || present < sync.start || present >= sync.end) {
-        return false;
-    }
-    const u64 counted_ns =
-        g_nx2_present_times_ns[present % g_nx2_present_times_ns.size()].load(std::memory_order_acquire);
-    if (counted_ns != 0 &&
-        ::Service::HID::g_npad_update_ns.load(std::memory_order_acquire) < counted_ns) {
-        sync.stale.push_back(present - sync.start);
-    }
-    return sync.sync;
+    return sync.active && sync.sync && present >= sync.start && present < sync.end;
 }
 
 /// A list of distinct clip frame numbers (0 to clip_frames - 1), at most max of them, sorted.
@@ -1462,7 +1444,6 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         sync.start = start;
         sync.end = start + total;
         sync.clip = start + clip_offset;
-        sync.stale.clear();
         UseReplyHook();
     }
     SCOPE_EXIT {
@@ -1561,11 +1542,6 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     } else if (measure || start_present) {
         result["landed_present"] = landed;
         result["npad_sync"] = npad_sync;
-        if (kit_hooks) {
-            ReplaySync& sync = GetReplaySync();
-            KitLock lock{sync.mutex, "replay sync mutex", __func__};
-            result["stale_presents"] = sync.stale;
-        }
     }
     if (measure) {
         if (timed && (presents < 2 || presents > MAX_MEASURED_PRESENTS)) {
@@ -1925,8 +1901,7 @@ bool RecordingWantsSync(u64 present) {
     return true;
 }
 
-/// g_nx2_present_reply_hook: the stale check of a replay, then the npad update a replay or a
-/// recording asks for (outside the recorder lock: the update takes the npad lock and then calls
+/// g_nx2_present_reply_hook: the npad update a replay or a recording asks for (outside the recorder lock: the update takes the npad lock and then calls
 /// the npad read hook, which keeps what it wrote), then the recording's reply sample.
 void PresentReply(u64 present) {
     const bool replay_sync = NoteReplayReply(present);

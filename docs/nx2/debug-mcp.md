@@ -471,19 +471,12 @@ while the injector was being installed, so `landed_present == first_present` whe
 succeed. A harness proves a landing error of 0 by checking `landed_present == start_present`. The
 plain reply stays as origin's.
 
-The same calls answer `stale_presents`: the offsets from `first_present` whose newest npad entry
-at the present's reply was written before the present was counted. The game reads the newest
-entry of the npad LIFO, not the injector. The npad updater writes that entry on its own 1 ms
-core-timing event, which in multicore runs on the timer thread by host time
-(`core_timing.cpp`), not in step with the game. The game resumes and reads after the reply of
-present c (`g_nx2_present_reply_hook`). When the time from count to reply is shorter than the
-wait for the next update, the newest entry still holds step c - 1, and the game gets the old
-input for one more frame. With the stamps on (only while a frame-step call or a recording in mode
-`"any"` runs), `ResourceManager::UpdateNpad` stores the host time of each update's start
-(`HID::g_npad_update_ns`) once its entries are written, so an update still running counts as not
-done. The reply hook compares it with the present's count time in `g_nx2_present_times_ns`. An
-update that began just before the count but read after it is counted as stale too, so the list is
-an upper bound.
+Why a replay needs the npad sync: the game reads the newest entry of the npad LIFO, not the
+injector. The npad updater writes that entry on its own 1 ms core-timing event, which in
+multicore runs on the timer thread by host time (`core_timing.cpp`), not in step with the game.
+The game resumes and reads after the reply of present c (`g_nx2_present_reply_hook`). When the
+time from count to reply is shorter than the wait for the next update, the newest entry still
+holds step c - 1, and the game gets the old input for one more frame.
 
 **`npad_sync`** (default true, any frame-step `input` or `input_sequence`) removes that race:
 at the reply of each covered present, the reply hook runs one npad update itself
@@ -491,8 +484,7 @@ at the reply of each covered present, the reply hook runs one npad update itself
 npad lock the 1 ms update takes, and each entry gets the next sampling number, so the game sees
 one more normal entry, the newest, with the present's step. The cost is one npad update per
 present (microseconds), only while a call runs. Side effects: the turbo-button phase advances one
-extra step per present. The stale check runs before the update, so `stale_presents` still shows
-where the race would have hit. `"npad_sync": false` turns the update off for an A/B; calls with
+extra step per present. `"npad_sync": false` turns the update off for an A/B; calls with
 `measure` or `start_present` echo `npad_sync`.
 
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
@@ -850,7 +842,7 @@ so every log names the kit the exe has.
 `EDEN_NX2_KIT_HOOKS=0` is the kill switch for a clean A/B. The server then installs none of the
 kit's hooks: `input_record`, `luma_watch`, `start_present` and an explicit `npad_sync: true` fail
 with an error that names the variable, frame-step calls run without the reply hook (no
-`npad_sync`, no `stale_presents`), the GPU does not store the composite present, the trainer's
+`npad_sync`), the GPU does not store the composite present, the trainer's
 step trace (`time_control {trace}`) is refused, and `features` answers `{features: ["input_ms",
 "measure"]` plus the trainer methods but not `time_trace`, and `pre_roll` and `scan_memory`,
 `kit, kit_hooks: false}`. `record_anchor`, `capture_frames` and `watch` are refused. Plain `input` and
