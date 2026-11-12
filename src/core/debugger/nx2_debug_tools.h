@@ -320,6 +320,11 @@ struct GamePadView {
     /// Per stick, the larger deflection of the two, after the deadzone and range settings.
     HID::AnalogStickState left{};
     HID::AnalogStickState right{};
+    /// Per stick, the controller that gives the stick above (PickPadStick): its stick before the
+    /// deadzone and range, with its deadzone, read with that value. nullopt with no controller
+    /// connected. The trainer overlay draws the deadzone and the raw position from it.
+    std::optional<Common::Input::StickStatus> left_status;
+    std::optional<Common::Input::StickStatus> right_status;
     bool recording{}; ///< input_record records (Ctrl+F8 or a client)
     u64 recorded{};   ///< presents recorded so far, as input_record status counts them
     bool record_full{}; ///< the recording is truncated and records no more
@@ -335,6 +340,17 @@ struct GamePadView {
     u64 pre_roll_kept{};
     u64 pre_roll_lost{};
 };
+
+/// One connected controller's stick as ReadGamePad reads it: the value the game gets and the
+/// controller's stick status (before the deadzone and range), read one after the other.
+struct PadStick {
+    HID::AnalogStickState game;
+    Common::Input::StickStatus status;
+};
+
+/// ReadGamePad's rule for each stick: the first controller, unless a later one gives the game a
+/// larger deflection. nullopt for no controllers.
+[[nodiscard]] std::optional<std::size_t> PickPadStick(std::span<const PadStick> sticks);
 
 /// Reads the getters the npad updater and input_record read, on the calling thread. Writes
 /// nothing. While a recording or replay runs it takes their locks for a moment, one at a time.
