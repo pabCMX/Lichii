@@ -9,6 +9,7 @@
 #include <QTimer>
 #include <QWidget>
 
+#include "core/perf_stats.h"
 #include "lichii/render/trainer_hud.h"
 
 namespace Core {
@@ -17,30 +18,35 @@ class System;
 class GRenderWindow;
 
 /// The trainer overlay (docs/nx2/trainer-kit.md, "Trainer overlay"): a click-through window over
-/// the bottom-left of the game image with the input the game is given. MainWindow creates it on
-/// the first hotkey press and toggles it with SetWanted. It reads the pad on a 60 Hz GUI timer
-/// that runs only while it is wanted and can show, and repaints only when what it shows changed.
-/// Later panels (frame-time bars) go above the input panel in this window.
+/// the game image with two panels, each on its own hotkey, shown alone or together. The input
+/// panel (the input the game is given) is at the bottom-left; the frame-time bars are centred
+/// along the bottom, or above the input panel when the image is too narrow for both side by side.
+/// MainWindow creates the window on the first hotkey press and toggles each panel with SetWanted.
+/// A GUI timer runs only while a panel is wanted and can show; a panel that is off does no work.
+/// Each panel repaints only when what it shows changed.
 class TrainerOverlay : public QWidget {
     Q_OBJECT
 
 public:
+    enum class Panel { Input, Bars };
+
     /// hidden() is true while the overlay must not show: no game runs, or the game is in
     /// exclusive fullscreen, where a tool window cannot show over the swapchain.
     TrainerOverlay(QWidget* parent, GRenderWindow* game_view, Core::System& system,
                    std::function<bool()> hidden);
 
-    void SetWanted(bool wanted);
-    [[nodiscard]] bool Wanted() const {
-        return wanted;
+    void SetWanted(Panel panel, bool wanted);
+    [[nodiscard]] bool Wanted(Panel panel) const {
+        return panel == Panel::Input ? input_wanted : bars_wanted;
     }
 
-    /// Starts the timer again if the overlay is wanted and can show now. Called when a game has
+    /// Starts the timer again if a panel is wanted and can show now. Called when a game has
     /// loaded and on show, hide and window state events of the game's windows.
     void Refresh();
 
 signals:
-    /// The REC state it shows changed, so the status bar can show the same count at once.
+    /// The REC state the input panel shows changed, so the status bar can show the same count at
+    /// once.
     void RecordChanged(bool recording, u64 recorded, bool full);
 
 protected:
@@ -49,9 +55,15 @@ protected:
 
 private:
     void Tick();
+    /// Stops the timer and lets go of the frame time history.
+    void Stop();
     /// Moves the window over the game image; false when it must not show.
     bool Place();
+    /// The timer's interval for the panels that are wanted.
+    void SetInterval();
     void ReadInput();
+    /// Adds the presents since the last tick as bars; true when the panel must repaint.
+    bool ReadBars();
 
     GRenderWindow* game_view;
     Core::System& system;
@@ -59,7 +71,11 @@ private:
     QTimer timer;
     /// The top-level window whose events start the timer again.
     QWidget* watched_top{};
-    bool wanted{};
+    bool input_wanted{};
+    bool bars_wanted{};
+    /// Each panel's place in this window, in its pixels.
+    QRect input_rect;
+    QRect bars_rect;
 
     TrainerHud::InputFrame frame{};
     TrainerHud::StickTrail left_trail;
@@ -68,6 +84,18 @@ private:
     /// The stick positions at the last present.
     TrainerHud::TrailPoint last_left{};
     TrainerHud::TrailPoint last_right{};
-    /// The base layer of the input panel at the window's size in device pixels.
+    /// The base layer of the input panel at its size in device pixels.
     QImage base;
+
+    TrainerHud::FrameBars bars;
+    TrainerHud::BarsLayout bars_layout{};
+    /// The bars, one column per FrameBars slot (TrainerHud::PaintBarSlots).
+    QImage bars_graph;
+    /// The end of the newest present already in bars.
+    Core::FrameTimeHistory::Clock::time_point last_bar_end{};
+    /// The text line's stats, taken at most every BARS_TEXT_MS.
+    TrainerHud::BarStats bars_stats{};
+    s64 bars_stats_ms{};
+    /// This overlay asked the perf stats to record the frame time history.
+    bool history_on{};
 };

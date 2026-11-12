@@ -16,9 +16,10 @@ namespace TrainerHud {
 constexpr double STICK_MAX = 32767.0;
 
 struct StickReading {
-    /// Compass degrees, 0 to 359: 0 is up (the stick pushed forward), turning clockwise, so 90 is
-    /// right and 270 is left. -1 when the stick is centred (magnitude under 0.005).
-    int angle;
+    /// Compass degrees rounded to hundredths, 0 to 359.99: 0 is up (the stick pushed forward),
+    /// turning clockwise, so 90 is right and 270 is left. -1 when the stick is centred (magnitude
+    /// under 0.005).
+    double angle;
     /// The length over STICK_MAX: 0 centred, 1 at the rim. Above 1 when the source gives square
     /// corners, such as a keyboard diagonal without range limits.
     double magnitude;
@@ -31,8 +32,10 @@ inline StickReading ReadStick(s32 x, s32 y) {
         return {.angle = -1, .magnitude = magnitude};
     }
     constexpr double DEGREES = 180.0 / 3.14159265358979323846;
-    const int angle = int(std::lround(std::atan2(double(x), double(y)) * DEGREES) + 360) % 360;
-    return {.angle = angle, .magnitude = magnitude};
+    // In hundredths first, so 359.996 shows as 0.00 and never as 360.00.
+    const long hundredths =
+        (std::lround(std::atan2(double(x), double(y)) * DEGREES * 100.0) + 36000) % 36000;
+    return {.angle = double(hundredths) / 100.0, .magnitude = magnitude};
 }
 
 /// One stick position the game was given, at a host time in milliseconds.

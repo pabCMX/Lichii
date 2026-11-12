@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cmath>
 
 #include <QFont>
+#include <QImage>
 #include <QPainter>
 #include <QString>
 
@@ -27,8 +29,16 @@ const QColor WAIT{120, 120, 120};
 const QColor PRE{21, 101, 192}; ///< a darker REPLAY: replayed input before the clip
 const QColor RING{70, 70, 70};
 const QColor WARNING{239, 108, 0};
+const QColor DEADZONE{255, 110, 110};
+const QColor RAW{255, 150, 150, 220};
+const QColor BAR_GREEN{60, 214, 88};
+const QColor BAR_ORANGE{255, 150, 0};
+const QColor BAR_RED{255, 56, 56};
+const QColor CLIP_CAP{255, 255, 255};
+const QColor GRAPH_BACK{0, 0, 0, 80};
+const QColor TARGET_LINE{255, 255, 255, 210};
 
-constexpr double STICK_RADIUS = 26.0;
+constexpr double STICK_RADIUS = 30.0;
 
 bool Held(const InputFrame& frame, NpadButton button) {
     return (frame.buttons & button) != NpadButton::None;
@@ -38,6 +48,15 @@ QFont Font(double pixels, bool bold) {
     QFont font;
     font.setPixelSize(int(pixels));
     font.setBold(bold);
+    return font;
+}
+
+/// A font whose digits all have the same width, so numbers that change keep their place.
+QFont NumberFont(double pixels, bool bold) {
+    QFont font = Font(pixels, bold);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    font.setFeature(QFont::Tag("tnum"), 1);
+#endif
     return font;
 }
 
@@ -77,9 +96,11 @@ QPointF StickPoint(QPointF centre, s32 x, s32 y) {
 }
 
 /// A stick as a dot in a circle, with the trail of its last positions; the circle lights while
-/// the stick is clicked.
-void Stick(QPainter& painter, Layer layer, QPointF centre, s32 x, s32 y, const StickTrail* trail,
-           s64 now_ms, bool clicked) {
+/// the stick is clicked. The deadzone is a ring at its radius, and raw (the stick before the
+/// deadzone and range) a small pink dot where it is away from the dot of what the game gets.
+void Stick(QPainter& painter, Layer layer, QPointF centre, s32 x, s32 y, float deadzone,
+           const std::optional<TrailPoint>& raw, const StickTrail* trail, s64 now_ms,
+           bool clicked) {
     if (layer == Layer::Base) {
         painter.setPen(QPen{IDLE_EDGE, 1.2});
         painter.setBrush(QColor{0, 0, 0, 70});
@@ -94,6 +115,14 @@ void Stick(QPainter& painter, Layer layer, QPointF centre, s32 x, s32 y, const S
         painter.setBrush(QColor{255, 202, 40, 60});
         painter.drawEllipse(centre, STICK_RADIUS, STICK_RADIUS);
     }
+    if (deadzone > 0.0f) {
+        const double radius = std::min(double(deadzone), 1.0) * STICK_RADIUS;
+        QColor fill = DEADZONE;
+        fill.setAlpha(45);
+        painter.setPen(QPen{DEADZONE, 1.0});
+        painter.setBrush(fill);
+        painter.drawEllipse(centre, radius, radius);
+    }
 
     // Older segments fade out.
     if (trail != nullptr) {
@@ -107,24 +136,41 @@ void Stick(QPainter& painter, Layer layer, QPointF centre, s32 x, s32 y, const S
             painter.drawLine(StickPoint(centre, from.x, from.y), StickPoint(centre, to.x, to.y));
         }
     }
-    painter.setPen(QPen{QColor{0, 0, 0, 160}, 1.0});
-    painter.setBrush(clicked ? LIT : QColor{255, 255, 255});
-    painter.drawEllipse(StickPoint(centre, x, y), 5.0, 5.0);
+    const QPointF dot = StickPoint(centre, x, y);
+    if (x == 0 && y == 0 && deadzone > 0.0f && !clicked) {
+        // Hollow while the game gets 0, so the deadzone and the raw dot show through.
+        painter.setPen(QPen{QColor{255, 255, 255}, 1.2});
+        painter.setBrush(Qt::NoBrush);
+    } else {
+        painter.setPen(QPen{QColor{0, 0, 0, 160}, 1.0});
+        painter.setBrush(clicked ? LIT : QColor{255, 255, 255});
+    }
+    painter.drawEllipse(dot, 4.0, 4.0);
+    // Small and over the game's dot, so it shows inside a small deadzone too.
+    if (raw) {
+        const QPointF raw_dot = StickPoint(centre, raw->x, raw->y);
+        if (std::hypot(raw_dot.x() - dot.x(), raw_dot.y() - dot.y()) > 1.0) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(RAW);
+            painter.drawEllipse(raw_dot, 2.2, 2.2);
+        }
+    }
 }
 
-/// The stick's angle and magnitude as two lines, at top_left.
+/// The stick's angle (hundredths of a degree) and magnitude (thousandths) as two lines, right
+/// aligned in a box at top_left that holds 359.99°, so the digits keep their place.
 void StickText(QPainter& painter, QPointF top_left, s32 x, s32 y) {
     const StickReading reading = ReadStick(x, y);
-    const QRectF angle_rect{top_left, QSizeF{64.0, 17.0}};
-    const QRectF magnitude_rect{top_left + QPointF{0, 18.0}, QSizeF{64.0, 17.0}};
+    const QRectF angle_rect{top_left, QSizeF{62.0, 17.0}};
+    const QRectF magnitude_rect{top_left + QPointF{0, 18.0}, QSizeF{62.0, 17.0}};
     painter.setPen(TEXT);
-    painter.setFont(Font(15, true));
-    painter.drawText(angle_rect, Qt::AlignLeft | Qt::AlignVCenter,
+    painter.setFont(NumberFont(13, true));
+    painter.drawText(angle_rect, Qt::AlignRight | Qt::AlignVCenter,
                      reading.angle < 0 ? QStringLiteral("---")
-                                       : QStringLiteral("%1°").arg(reading.angle));
-    painter.setFont(Font(14, false));
-    painter.drawText(magnitude_rect, Qt::AlignLeft | Qt::AlignVCenter,
-                     QString::number(reading.magnitude, 'f', 2));
+                                       : QStringLiteral("%1°").arg(reading.angle, 0, 'f', 2));
+    painter.setFont(NumberFont(13, false));
+    painter.drawText(magnitude_rect, Qt::AlignRight | Qt::AlignVCenter,
+                     QString::number(reading.magnitude, 'f', 3));
 }
 
 /// The REC, PRE-ROLL, REPLAY, PRE and WAIT marks.
@@ -168,8 +214,17 @@ void StateMarks(QPainter& painter, const InputFrame& frame) {
 
 } // Anonymous namespace
 
+namespace {
+
+/// Layout units to pixels for a game image.
+double PanelScale(const QRect& image) {
+    return std::clamp(image.height() / 720.0, 0.75, 4.0);
+}
+
+} // Anonymous namespace
+
 QRect PanelRect(const QRect& image) {
-    const double scale = std::clamp(image.height() / 720.0, 0.75, 4.0);
+    const double scale = PanelScale(image);
     const double margin = 16.0 * scale;
     const QSizeF size = INPUT_PANEL_SIZE * scale;
     return QRectF{image.left() + margin, image.bottom() + 1 - margin - size.height(), size.width(),
@@ -229,15 +284,15 @@ void Paint(QPainter& painter, Layer layer, const InputFrame& frame) {
     arm({0, 15}, NpadButton::Down);
     arm({-15, 0}, NpadButton::Left);
 
-    Stick(painter, layer, {44, 84}, frame.left_x, frame.left_y, frame.left_trail, frame.now_ms,
-          Held(frame, NpadButton::StickL));
+    Stick(painter, layer, {44, 84}, frame.left_x, frame.left_y, frame.left_deadzone, frame.left_raw,
+          frame.left_trail, frame.now_ms, Held(frame, NpadButton::StickL));
     if (live) {
-        StickText(painter, {76, 66}, frame.left_x, frame.left_y);
+        StickText(painter, {78, 66}, frame.left_x, frame.left_y);
     }
-    Stick(painter, layer, {240, 136}, frame.right_x, frame.right_y, frame.right_trail, frame.now_ms,
-          Held(frame, NpadButton::StickR));
+    Stick(painter, layer, {240, 136}, frame.right_x, frame.right_y, frame.right_deadzone,
+          frame.right_raw, frame.right_trail, frame.now_ms, Held(frame, NpadButton::StickR));
     if (live) {
-        StickText(painter, {272, 118}, frame.right_x, frame.right_y);
+        StickText(painter, {274, 118}, frame.right_x, frame.right_y);
     }
     painter.restore();
 }
@@ -255,6 +310,135 @@ void PaintInputLive(QPainter& painter, const InputFrame& frame) {
 void PaintInputPanel(QPainter& painter, const InputFrame& frame) {
     PaintInputBase(painter);
     PaintInputLive(painter, frame);
+}
+
+namespace {
+
+/// The bars panel in device-independent pixels.
+constexpr double BARS_PADDING = 6.0;
+constexpr double BARS_TEXT_HEIGHT = 16.0;
+constexpr double BARS_GRAPH_HEIGHT = 100.0;
+/// Right of the graph, for the "60" and "30" labels.
+constexpr double BARS_LABEL_WIDTH = 20.0;
+
+QColor BarColourOf(double ms) {
+    switch (ColourOf(ms)) {
+    case BarColour::Green:
+        return BAR_GREEN;
+    case BarColour::Orange:
+        return BAR_ORANGE;
+    case BarColour::Red:
+        break;
+    }
+    return BAR_RED;
+}
+
+int Pixels(double units, double ratio) {
+    return int(std::lround(units * ratio));
+}
+
+} // Anonymous namespace
+
+BarsLayout LayoutBars(double ratio) {
+    const BarPixels pixels = BarPixelsFor(ratio);
+    const int padding = Pixels(BARS_PADDING, ratio);
+    const QRect graph{padding, padding + Pixels(BARS_TEXT_HEIGHT + 4.0, ratio),
+                      int(BAR_COUNT) * pixels.pitch, Pixels(BARS_GRAPH_HEIGHT, ratio)};
+    const QSize size{graph.right() + 1 + Pixels(BARS_LABEL_WIDTH, ratio) + padding,
+                     graph.bottom() + 1 + padding};
+    return {.ratio = ratio, .pixels = pixels, .size = size, .graph = graph};
+}
+
+QRect BarsRect(const QRect& image, QSize size, const std::optional<QRect>& input) {
+    const double scale = PanelScale(image);
+    std::optional<Box> input_box;
+    if (input) {
+        input_box = Box{input->x(), input->y(), input->width(), input->height()};
+    }
+    const Box box = PlaceBars({image.x(), image.y(), image.width(), image.height()}, size.width(),
+                              size.height(), int(std::lround(16.0 * scale)), input_box,
+                              int(std::lround(8.0 * scale)));
+    return {box.x, box.y, box.width, box.height};
+}
+
+void PaintBarSlot(QImage& graph, const BarsLayout& layout, const FrameBars& bars, size_t slot) {
+    const int pitch = layout.pixels.pitch;
+    const int height = graph.height();
+    QPainter painter{&graph};
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.fillRect(int(slot) * pitch, 0, pitch, height, Qt::transparent);
+    if (!bars.Used(slot)) {
+        return;
+    }
+    const double ms = bars[slot];
+    const BarSize bar = MeasureBar(ms, height);
+    const int x = int(slot) * pitch;
+    painter.fillRect(x, height - bar.height, layout.pixels.bar, bar.height, BarColourOf(ms));
+    if (bar.clipped) {
+        // A bright cap: this frame is longer than the scale.
+        painter.fillRect(x, 0, layout.pixels.bar, std::max(3, Pixels(3.0, layout.ratio)), CLIP_CAP);
+    }
+}
+
+void PaintBarSlots(QImage& graph, const BarsLayout& layout, const FrameBars& bars) {
+    for (size_t slot = 0; slot < BAR_COUNT; ++slot) {
+        PaintBarSlot(graph, layout, bars, slot);
+    }
+}
+
+void PaintBarsPanel(QPainter& painter, const BarsLayout& layout, const QImage& graph,
+                    size_t first_slot, const BarStats& stats) {
+    const double ratio = layout.ratio;
+    const QRect& area = layout.graph;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(PANEL);
+    painter.drawRoundedRect(QRectF{QPointF{}, QSizeF{layout.size}}, 10.0 * ratio, 10.0 * ratio);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.fillRect(area, GRAPH_BACK);
+
+    // The ring of slots: the first slot at the left edge, the newest bar at the right.
+    const int split = int(first_slot) * layout.pixels.pitch;
+    painter.drawImage(QPoint{area.left(), area.top()}, graph,
+                      QRect{split, 0, graph.width() - split, graph.height()});
+    if (split != 0) { // an empty source rect would draw the whole image
+        painter.drawImage(QPoint{area.left() + graph.width() - split, area.top()}, graph,
+                          QRect{0, 0, split, graph.height()});
+    }
+
+    // The target lines over the bars, labelled right of the graph.
+    const int line = std::max(1, Pixels(1.0, ratio));
+    painter.setFont(NumberFont(11.0 * ratio, true));
+    for (const auto& [ms, label] : {std::pair{LINE_60_MS, QStringLiteral("60")},
+                                    std::pair{LINE_30_MS, QStringLiteral("30")}}) {
+        const int row = area.top() + LineRow(ms, area.height());
+        painter.fillRect(area.left(), row, area.width(), line, TARGET_LINE);
+        const QRectF label_rect{double(area.right() + 1 + Pixels(4.0, ratio)), row - 8.0 * ratio,
+                                BARS_LABEL_WIDTH * ratio, 16.0 * ratio};
+        painter.setPen(TARGET_LINE);
+        painter.drawText(label_rect, Qt::AlignLeft | Qt::AlignVCenter, label);
+    }
+
+    // The text line: mean, FPS, worst. The worst frame takes its bar's colour.
+    const QRectF text_rect{double(area.left()), BARS_PADDING * ratio, double(area.width()),
+                           BARS_TEXT_HEIGHT * ratio};
+    painter.setFont(NumberFont(13.0 * ratio, true));
+    painter.setPen(TEXT);
+    if (stats.count == 0) {
+        painter.drawText(text_rect, Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("frame time: no presents yet"));
+    } else {
+        painter.drawText(text_rect, Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("%1 ms   %2 FPS")
+                             .arg(stats.mean_ms, 0, 'f', 1)
+                             .arg(1000.0 / stats.mean_ms, 0, 'f', 1));
+        const QString worst = QStringLiteral("worst %1 ms").arg(stats.worst_ms, 0, 'f', 1);
+        painter.setPen(BarColourOf(stats.worst_ms));
+        painter.drawText(text_rect, Qt::AlignRight | Qt::AlignVCenter, worst);
+    }
+    painter.restore();
 }
 
 } // namespace TrainerHud
