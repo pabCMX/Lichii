@@ -28,13 +28,14 @@ using Common::DkbCpuTrace::Role;
 
 // Layout of the "6 · 3 + big number" design at 100% scale; Qt scales it with the DPI.
 constexpr int OverlayWidth = 300;
-constexpr int OverlayHeight = 158;
+// Lichii: the trainer's frame-time bars panel replaces the graph (GraphHeight 0, no paintGraph).
+constexpr int OverlayHeight = 158 - 72;
 constexpr qreal PaddingX = 10;
 constexpr qreal PaddingTop = 6;
 constexpr qreal ContentWidth = 280;
 constexpr qreal HeaderHeight = 44;
 constexpr qreal GraphTop = PaddingTop + HeaderHeight + 4;
-constexpr qreal GraphHeight = 72;
+constexpr qreal GraphHeight = 0;
 constexpr qreal PlotWidth = 236;
 constexpr qreal AxisX = 240;
 constexpr qreal LabelX = 247;
@@ -267,8 +268,6 @@ void PerformanceOverlay::paintEvent(QPaintEvent* event) {
     };
     DrawRuns(painter, right - Width(load_runs), Baseline(small_font, right_top + 17, 17),
              load_runs);
-
-    paintGraph(painter, QRectF{PaddingX, GraphTop, ContentWidth, GraphHeight});
 
     // Footer: fps min/median/max over the last 5 s, and the features that are on.
     QString fps_range = QStringLiteral("— — —");
