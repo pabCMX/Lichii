@@ -31,7 +31,9 @@ constexpr s64 BARS_TEXT_MS = 250;
 /// How far back each tick reads the frame time history: far more than a tick, and the whole
 /// panel at 60 FPS on the first tick. When the panel is further behind, a tick reads all of it.
 constexpr auto BARS_READ_WINDOW = std::chrono::seconds{2};
-constexpr auto BARS_READ_ALL = std::chrono::hours{24};
+/// FrameTimeHistory::Recent compares newest - end < window, both rising times, so max() cannot
+/// overflow and no age cuts the history off.
+constexpr auto BARS_READ_ALL = Core::FrameTimeHistory::Clock::duration::max();
 
 s64 NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
