@@ -430,9 +430,10 @@ private slots:
     void OnToggleFilterBar();
     void OnToggleStatusBar();
     void OnTogglePerfOverlay();
-    /// The "Toggle Trainer Overlay" hotkey: shows or hides the input display over the game. Off
-    /// at start and not saved.
+    /// The "Toggle Trainer Overlay" and "Toggle Frame Time Bars" hotkeys: show or hide the input
+    /// panel or the frame-time bars panel over the game. Off at start and not saved.
     void OnToggleTrainerOverlay();
+    void OnToggleFrameTimeBars();
 #ifdef HAS_RESHADE
     void OnPostProcessingShaders();
 #endif
@@ -524,6 +525,8 @@ private:
     void UpdatePresentRecordLabel();
     /// Sets the status bar's REC label; the trainer overlay calls it whenever its REC changes.
     void ShowPresentRecord(bool recording, u64 recorded, bool full);
+    /// Shows or hides one trainer overlay panel: the frame-time bars, or else the input panel.
+    void ToggleTrainerPanel(bool bars);
     /// Shows message in the status bar's message label for milliseconds. Use it in place of
     /// QStatusBar::showMessage, which draws left of the permanent widgets: they start at the
     /// left edge here, so its text is not seen.

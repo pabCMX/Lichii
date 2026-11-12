@@ -16,8 +16,10 @@ TEST_CASE("Stick angles are compass degrees: 0 up, clockwise", "[trainer_hud]") 
     REQUIRE(ReadStick(-MAX, 0).angle == 270);
     REQUIRE(ReadStick(20000, 20000).angle == 45);
     REQUIRE(ReadStick(-20000, 20000).angle == 315);
-    // Just left of up rounds to 0, never to 360.
-    REQUIRE(ReadStick(-10, MAX).angle == 0);
+    // Hundredths: just left of up is 359.98, and closer still rounds to 0, never to 360.
+    REQUIRE(ReadStick(-10, MAX).angle == Catch::Approx(359.98));
+    REQUIRE(ReadStick(-1, MAX).angle == 0);
+    REQUIRE(ReadStick(147, -23985).angle == Catch::Approx(179.65));
     REQUIRE(ReadStick(0, 0).angle == -1);
     REQUIRE(ReadStick(100, 0).angle == -1); // under 0.005: centred
 }

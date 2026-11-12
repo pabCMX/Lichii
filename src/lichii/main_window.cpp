@@ -1510,6 +1510,7 @@ void MainWindow::InitializeHotkeys() {
     connect_shortcut(QStringLiteral("Record Input (Per Present)"),
                      &MainWindow::OnPresentRecordToggle);
     connect_shortcut(QStringLiteral("Toggle Trainer Overlay"), &MainWindow::OnToggleTrainerOverlay);
+    connect_shortcut(QStringLiteral("Toggle Frame Time Bars"), &MainWindow::OnToggleFrameTimeBars);
     connect_shortcut(QStringLiteral("Toggle Renderdoc Capture"), [] {
         if (Settings::values.enable_renderdoc_hotkey) {
             QtCommon::system->GetRenderdocAPI().ToggleCapture();
@@ -4635,6 +4636,16 @@ void MainWindow::OnTogglePerfOverlay() {
 }
 
 void MainWindow::OnToggleTrainerOverlay() {
+    ToggleTrainerPanel(false);
+}
+
+void MainWindow::OnToggleFrameTimeBars() {
+    ToggleTrainerPanel(true);
+}
+
+void MainWindow::ToggleTrainerPanel(bool bars) {
+    const TrainerOverlay::Panel panel =
+        bars ? TrainerOverlay::Panel::Bars : TrainerOverlay::Panel::Input;
     if (!trainer_overlay) {
         // Hidden with no game, and in exclusive fullscreen, where a window cannot show over the
         // game's swapchain.
@@ -4645,8 +4656,8 @@ void MainWindow::OnToggleTrainerOverlay() {
         connect(trainer_overlay, &TrainerOverlay::RecordChanged, this,
                 &MainWindow::ShowPresentRecord);
     }
-    trainer_overlay->SetWanted(!trainer_overlay->Wanted());
-    if (trainer_overlay->Wanted() && !emulation_running) {
+    trainer_overlay->SetWanted(panel, !trainer_overlay->Wanted(panel));
+    if (trainer_overlay->Wanted(panel) && !emulation_running) {
         ShowStatusMessage(tr("Trainer overlay on: it shows when a game runs"), 4000);
     }
 }

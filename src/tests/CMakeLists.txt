@@ -28,6 +28,7 @@ add_executable(tests
     core/nx2_trainer_tools.cpp
     core/nx2_game_pad_view.cpp
     lichii/trainer_input.cpp
+    lichii/trainer_bars.cpp
     core/oot_time_control.cpp
     core/nx2_present_pacer.cpp
     core/nx2_fence_action.cpp

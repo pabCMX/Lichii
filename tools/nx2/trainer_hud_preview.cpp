@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Paints the trainer overlay's input panel over a stand-in game image at 1280x720 and 3840x2160,
-// so its layout can be checked on a machine without a display. Not part of the build:
+// Paints the trainer overlay's panels (input, frame-time bars) over a stand-in game image at
+// 1280x720, 800x450 and 3840x2160 from made-up data, so their layout can be checked on a machine
+// without a display. Not part of the build:
 //
 //   g++ -std=c++20 -fPIC -Isrc $(pkg-config --cflags Qt6Gui) tools/nx2/trainer_hud_preview.cpp
 //       src/lichii/render/trainer_hud.cpp $(pkg-config --libs Qt6Gui) -o /tmp/trainer_hud_preview
 //   QT_QPA_PLATFORM=offscreen /tmp/trainer_hud_preview <output directory>
 
+#include <cmath>
 #include <cstdio>
+#include <optional>
 
 #include <QGuiApplication>
 #include <QImage>
@@ -32,14 +35,44 @@ StickTrail Flick(s64 now_ms) {
     return trail;
 }
 
-void Render(const QString& path, QSize image_size, const InputFrame& frame) {
+void Save(const QImage& image, const QString& path) {
+    if (!image.save(path)) {
+        std::fprintf(stderr, "cannot write %s\n", qPrintable(path));
+    } else {
+        std::printf("%s\n", qPrintable(path));
+    }
+}
+
+/// The bars panel alone at a device pixel ratio, as the overlay paints it.
+QImage BarsPanel(const FrameBars& bars, double ratio) {
+    const BarsLayout layout = LayoutBars(ratio);
+    QImage graph{layout.graph.size(), QImage::Format_ARGB32_Premultiplied};
+    PaintBarSlots(graph, layout, bars);
+    QImage panel{layout.size, QImage::Format_ARGB32_Premultiplied};
+    panel.fill(Qt::transparent);
+    QPainter painter{&panel};
+    PaintBarsPanel(painter, layout, graph, bars.FirstSlot(), bars.Stats());
+    return panel;
+}
+
+/// The input panel alone at scale times its layout size, to look at the details.
+QImage InputPanel(const InputFrame& frame, double scale) {
+    QImage panel{(INPUT_PANEL_SIZE * scale).toSize(), QImage::Format_ARGB32_Premultiplied};
+    panel.fill(QColor{60, 90, 50});
+    QPainter painter{&panel};
+    painter.scale(scale, scale);
+    PaintInputPanel(painter, frame);
+    return panel;
+}
+
+/// A stand-in game image: sky, ground, Ocarina's minimap (bottom right) and the centre.
+QImage Scene(QSize image_size) {
     QImage image{image_size, QImage::Format_ARGB32_Premultiplied};
     QPainter painter{&image};
     QLinearGradient sky{0, 0, 0, double(image_size.height())};
     sky.setColorAt(0, QColor{70, 110, 160});
     sky.setColorAt(1, QColor{60, 90, 50});
     painter.fillRect(image.rect(), sky);
-    // Stand-ins for Ocarina's minimap (bottom right) and the centre of the image.
     const double unit = image_size.height() / 720.0;
     painter.setPen(QPen{Qt::white, 2 * unit});
     painter.setBrush(QColor{0, 0, 0, 90});
@@ -50,16 +83,39 @@ void Render(const QString& path, QSize image_size, const InputFrame& frame) {
                      Qt::AlignCenter, QStringLiteral("minimap"));
     painter.drawEllipse(QPointF{image_size.width() / 2.0, image_size.height() / 2.0}, 40 * unit,
                         40 * unit);
+    return image;
+}
 
-    const QRect panel = PanelRect(QRect{QPoint{}, image_size});
-    painter.translate(panel.topLeft());
-    painter.scale(panel.width() / INPUT_PANEL_SIZE.width(), panel.height() / INPUT_PANEL_SIZE.height());
-    PaintInputPanel(painter, frame);
+/// The game image with the panels placed as the overlay places them (ratio 1). bars or frame may
+/// be null to leave that panel out.
+void Render(const QString& path, QSize image_size, const InputFrame* frame,
+            const FrameBars* bars) {
+    QImage image = Scene(image_size);
+    QPainter painter{&image};
+    const QRect image_rect{QPoint{}, image_size};
+    const QRect panel = PanelRect(image_rect);
+    if (frame != nullptr) {
+        painter.save();
+        painter.translate(panel.topLeft());
+        painter.scale(panel.width() / INPUT_PANEL_SIZE.width(),
+                      panel.height() / INPUT_PANEL_SIZE.height());
+        PaintInputPanel(painter, *frame);
+        painter.restore();
+    }
+    if (bars != nullptr) {
+        const QImage bars_panel = BarsPanel(*bars, 1.0);
+        const QRect place = BarsRect(image_rect, bars_panel.size(),
+                                     frame != nullptr ? std::optional{panel} : std::nullopt);
+        painter.drawImage(place.topLeft(), bars_panel);
+    }
     painter.end();
-    if (!image.save(path)) {
-        std::fprintf(stderr, "cannot write %s\n", qPrintable(path));
-    } else {
-        std::printf("%s\n", qPrintable(path));
+    Save(image, path);
+}
+
+/// count frames of ms each, with a little pacing noise.
+void Run(FrameBars& bars, int count, double ms) {
+    for (int i = 0; i < count; ++i) {
+        bars.Push(float(ms + 0.35 * std::sin(i * 1.7)));
     }
 }
 
@@ -104,13 +160,67 @@ int main(int argc, char** argv) {
     InputFrame ring{.now_ms = now, .ring_armed = true, .ring_kept = 2741};
     InputFrame ring_lost{.now_ms = now, .ring_armed = true, .ring_kept = 18000, .ring_lost = 604};
 
-    Render(out + QStringLiteral("/hud-720-rec.png"), {1280, 720}, recording);
-    Render(out + QStringLiteral("/hud-720-replay.png"), {1280, 720}, replaying);
-    Render(out + QStringLiteral("/hud-720-idle.png"), {1280, 720}, idle);
-    Render(out + QStringLiteral("/hud-720-wait.png"), {1280, 720}, wait);
-    Render(out + QStringLiteral("/hud-720-pre.png"), {1280, 720}, pre);
-    Render(out + QStringLiteral("/hud-720-preroll.png"), {1280, 720}, ring);
-    Render(out + QStringLiteral("/hud-720-preroll-lost.png"), {1280, 720}, ring_lost);
-    Render(out + QStringLiteral("/hud-2160-rec.png"), {3840, 2160}, recording);
+    Render(out + QStringLiteral("/hud-720-rec.png"), {1280, 720}, &recording, nullptr);
+    Render(out + QStringLiteral("/hud-720-replay.png"), {1280, 720}, &replaying, nullptr);
+    Render(out + QStringLiteral("/hud-720-idle.png"), {1280, 720}, &idle, nullptr);
+    Render(out + QStringLiteral("/hud-720-wait.png"), {1280, 720}, &wait, nullptr);
+    Render(out + QStringLiteral("/hud-720-pre.png"), {1280, 720}, &pre, nullptr);
+    Render(out + QStringLiteral("/hud-720-preroll.png"), {1280, 720}, &ring, nullptr);
+    Render(out + QStringLiteral("/hud-720-preroll-lost.png"), {1280, 720}, &ring_lost, nullptr);
+    Render(out + QStringLiteral("/hud-2160-rec.png"), {3840, 2160}, &recording, nullptr);
+
+    // The deadzone: the left stick moves inside its deadzone (the game gets 0, the raw dot
+    // moves); the right stick at 179.65 degrees, magnitude 0.732, its raw dot further out.
+    InputFrame deadzone{.left_x = 0,
+                        .left_y = 0,
+                        .right_x = 147,
+                        .right_y = -23985,
+                        .left_deadzone = 0.15f,
+                        .right_deadzone = 0.15f,
+                        .left_raw = TrailPoint{.x = 2900, .y = 2300, .ms = now},
+                        .right_raw = TrailPoint{.x = 166, .y = -27300, .ms = now},
+                        .now_ms = now};
+    Render(out + QStringLiteral("/input-720-deadzone.png"), {1280, 720}, &deadzone, nullptr);
+    Save(InputPanel(deadzone, 3.0), out + QStringLiteral("/input-zoom-deadzone.png"));
+    Save(InputPanel(deadzone, 1.0), out + QStringLiteral("/input-1x-deadzone.png"));
+    // A replay: no raw dot, the ring stays.
+    InputFrame replay_ring{.left_x = 20000,
+                           .left_y = 9000,
+                           .left_deadzone = 0.15f,
+                           .right_deadzone = 0.15f,
+                           .now_ms = now,
+                           .replaying = true};
+    Render(out + QStringLiteral("/input-720-replay-ring.png"), {1280, 720}, &replay_ring, nullptr);
+    Save(InputPanel(replay_ring, 3.0), out + QStringLiteral("/input-zoom-replay-ring.png"));
+
+    FrameBars steady60;
+    Run(steady60, 120, 1000.0 / 60.0);
+    FrameBars steady30;
+    Run(steady30, 120, 1000.0 / 30.0);
+    // 60 FPS, a 20 ms run, back to 60, a 40 ms run, one 120 ms stutter, 60 to the end.
+    FrameBars mix;
+    Run(mix, 25, 1000.0 / 60.0);
+    Run(mix, 20, 20.0);
+    Run(mix, 15, 1000.0 / 60.0);
+    Run(mix, 12, 40.0);
+    Run(mix, 10, 1000.0 / 60.0);
+    mix.Push(120.0f);
+    Run(mix, 40, 1000.0 / 60.0);
+    FrameBars started; // a few frames after the panel was turned on
+    Run(started, 30, 1000.0 / 60.0);
+    FrameBars empty;
+
+    Save(BarsPanel(steady60, 1.0), out + QStringLiteral("/bars-60.png"));
+    Save(BarsPanel(steady30, 1.0), out + QStringLiteral("/bars-30.png"));
+    Save(BarsPanel(mix, 1.0), out + QStringLiteral("/bars-mix.png"));
+    Save(BarsPanel(mix, 1.5), out + QStringLiteral("/bars-mix-ratio-1.5.png"));
+    Save(BarsPanel(started, 1.0), out + QStringLiteral("/bars-started.png"));
+    Save(BarsPanel(empty, 1.0), out + QStringLiteral("/bars-empty.png"));
+
+    // Placement: alone, side by side with the input panel, and above it on a narrow image.
+    Render(out + QStringLiteral("/both-720-bars-alone.png"), {1280, 720}, nullptr, &mix);
+    Render(out + QStringLiteral("/both-720.png"), {1280, 720}, &deadzone, &mix);
+    Render(out + QStringLiteral("/both-450-stacked.png"), {800, 450}, &deadzone, &mix);
+    Render(out + QStringLiteral("/both-2160.png"), {3840, 2160}, &recording, &mix);
     return 0;
 }
