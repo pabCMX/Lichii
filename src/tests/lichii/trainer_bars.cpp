@@ -159,14 +159,17 @@ TEST_CASE("Bars lost while the GUI thread stalls start the panel again, never a 
     REQUIRE(cut.fresh.size() == 60);
 
     // The whole history still holds the last bar: all 90 go on after it.
-    const BarsUpdate whole = UpdateBars(Join(shown, stall), last);
+    // Each history copy is a named local: an update's fresh is a view into it.
+    const std::vector<Entry> held = Join(shown, stall);
+    const BarsUpdate whole = UpdateBars(held, last);
     REQUIRE_FALSE(whole.restart);
     REQUIRE(whole.fresh.size() == 90);
     REQUIRE(whole.fresh.front().end == stall.front().end);
 
     // The history overflowed (2048 entries, all after the last bar): start again from the newest.
-    const BarsUpdate overflow =
-        UpdateBars(Presents(120 * 33 + 5000, int(Core::FrameTimeHistory::Capacity)), last);
+    const std::vector<Entry> full =
+        Presents(120 * 33 + 5000, int(Core::FrameTimeHistory::Capacity));
+    const BarsUpdate overflow = UpdateBars(full, last);
     REQUIRE(overflow.restart);
     REQUIRE(overflow.fresh.size() == BAR_COUNT);
 }
@@ -180,11 +183,13 @@ TEST_CASE("A history that started again resets the bars; a second reader does no
     // Its newest entry is older than the last bar.
     REQUIRE(UpdateBars(std::span{shown}.first(50), last).restart);
     // A new game's entries, all after the last bar: the last bar is not among them.
-    const BarsUpdate next_game = UpdateBars(Presents(10'000, 30), last);
+    const std::vector<Entry> next_entries = Presents(10'000, 30);
+    const BarsUpdate next_game = UpdateBars(next_entries, last);
     REQUIRE(next_game.restart);
     REQUIRE(next_game.fresh.size() == 30);
     // The performance overlay starts reading too: the history is not cleared, so the bars go on.
-    const BarsUpdate second_reader = UpdateBars(Join(shown, Presents(120 * 33, 2)), last);
+    const std::vector<Entry> kept = Join(shown, Presents(120 * 33, 2));
+    const BarsUpdate second_reader = UpdateBars(kept, last);
     REQUIRE_FALSE(second_reader.restart);
     REQUIRE(second_reader.fresh.size() == 2);
 }
