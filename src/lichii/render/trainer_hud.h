@@ -16,8 +16,9 @@
 class QImage;
 class QPainter;
 
-/// The panels of the trainer overlay. The input panel is painted in layout units, which the
-/// overlay scales to pixels for the size of the game image; the bars panel in device pixels.
+/// The panels of the trainer overlay. Both grow with the game image by PanelScale. The input panel
+/// is painted in layout units, which the overlay scales to pixels; the bars panel in whole device
+/// pixels, so every bar has the same width.
 /// Needs Qt Gui only, so tools/nx2/trainer_hud_preview.cpp paints the same panels into a PNG.
 namespace TrainerHud {
 
@@ -58,15 +59,15 @@ constexpr s64 TRAIL_MS = 500;
 /// clear of Ocarina's minimap (bottom-right) and the centre. One layout unit is a pixel at 720p.
 [[nodiscard]] QRect PanelRect(const QRect& image);
 
-/// The bars panel in device pixels at one device pixel ratio. Its pixel sizes are fixed (they do
-/// not follow the game image), so a bar is always BAR_PITCH device-independent pixels wide.
+/// The bars panel in device pixels at unit device pixels per layout unit: the game image's
+/// PanelScale times the device pixel ratio, so it grows with the image like the input panel.
 struct BarsLayout {
-    double ratio{};
+    double unit{};
     BarPixels pixels{};
     QSize size;  ///< the whole panel
     QRect graph; ///< the bars, inside the panel
 };
-[[nodiscard]] BarsLayout LayoutBars(double ratio);
+[[nodiscard]] BarsLayout LayoutBars(double unit);
 
 /// Where the bars panel goes over the game image (pixels, like PanelRect): centred along the
 /// bottom, or above the input panel when input is set and they do not fit side by side.
