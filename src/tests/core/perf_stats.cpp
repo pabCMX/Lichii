@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <memory>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -58,4 +59,39 @@ TEST_CASE("Frame time history keeps the newest window in order", "[core][perf_st
 
     history.Clear();
     REQUIRE(history.Recent(1h).empty());
+}
+
+TEST_CASE("Frame time history records while any reader wants it", "[core][perf_stats]") {
+    using Reader = Core::PerfStats::FrameTimeReader;
+    // On the heap: it holds an hour of frame times (1.7 MB).
+    const auto stats_owner = std::make_unique<Core::PerfStats>(0);
+    Core::PerfStats& stats = *stats_owner;
+    const auto frame = [&] {
+        stats.BeginSystemFrame();
+        stats.EndSystemFrame();
+    };
+    frame();
+    REQUIRE(stats.GetRecentFrameTimes(1h).empty());
+
+    stats.SetFrameTimeHistoryEnabled(true, Reader::TrainerBars);
+    frame();
+    // The performance overlay sets "off" at each stats update while it is hidden.
+    stats.SetFrameTimeHistoryEnabled(false);
+    frame();
+    REQUIRE(stats.GetRecentFrameTimes(1h).size() == 2);
+
+    // A second reader keeps the entries; the last one to stop stops the recording.
+    stats.SetFrameTimeHistoryEnabled(true);
+    frame();
+    REQUIRE(stats.GetRecentFrameTimes(1h).size() == 3);
+    stats.SetFrameTimeHistoryEnabled(false, Reader::TrainerBars);
+    frame();
+    REQUIRE(stats.GetRecentFrameTimes(1h).size() == 4);
+    stats.SetFrameTimeHistoryEnabled(false);
+    frame();
+    REQUIRE(stats.GetRecentFrameTimes(1h).size() == 4);
+
+    // Starting again with no reader clears the old entries.
+    stats.SetFrameTimeHistoryEnabled(true, Reader::TrainerBars);
+    REQUIRE(stats.GetRecentFrameTimes(1h).empty());
 }
