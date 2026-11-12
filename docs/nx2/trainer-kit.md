@@ -325,11 +325,14 @@ the scaled sizes). At 16:9 they are side by side from 720p to 4K.
   deadzone and range) when it is away from the white dot of what the game gets. Inside the
   deadzone the game gets 0: the white dot becomes a small hollow dot inside the ring, and the pink
   dot moves. The source is
-  `EmulatedController::GetSticksValues()`: `raw_value`, `value` and `properties.deadzone` per
-  axis, as the input settings preview uses them. The pink dot shows only for the controller whose
-  `value` matches the stick the game gets, and never during a replay or its pre-roll: then the
-  game's stick comes from the debug server, so only the ring and the white dot show. The pink dot
-  moves in steps of 1/64 of a deflection, so stick noise does not repaint the panel.
+  `EmulatedController::GetSticksValues()`: `raw_value` and `properties.deadzone` per axis, as the
+  input settings preview uses them. `ReadGamePad` reads them per stick from the same controller
+  that gives the game its value (`Nx2Debug::PickPadStick`: the larger deflection the game gets,
+  Player 1 on a tie), right after that value. No pink dot during a replay or its pre-roll: then
+  the game's stick comes from the debug server, so only the ring and the white dot show. The
+  pink dot moves in steps of 1/64 of a deflection, so stick noise does not repaint the panel.
+  These reads take no lock, as in upstream's preview; a read mixed with an input write gives one
+  wrong dot for one tick, and every drawn position is clamped to the stick circle's box.
 - `REC n` while `input_record` records (Ctrl+F8 or a client), with the presents recorded so far.
   It is the count `input_record` `status` and `stop` give. While the input panel shows, it also
   sets the status bar's `REC INPUT n presents` at each change, so both show the same number.
@@ -362,14 +365,19 @@ between two ticks are all drawn, in order.
   most 4 times a second.
 - Data: upstream's `FrameTimeHistory` (`PerfStats::GetRecentFrameTimes`), one entry per present
   with its end time and the present-to-present interval. Each tick copies the last 2 s under the
-  perf stats mutex and adds the entries newer than the last bar. The history records while any
+  perf stats mutex; when the last bar is older than that, it copies all the history holds. The end
+  times number the presents (`TrainerHud::UpdateBars`): the bars go on after the last bar only
+  when it is still in the copy. If presents were lost (the GUI thread fell behind more than the
+  2048 entries the history holds) or the history started again, the panel starts again from the
+  newest 120. It also starts empty when a game stops and when one has loaded. The history records while any
   reader wants it (`PerfStats::FrameTimeReader`): the panel and upstream's performance overlay
   cannot switch it off under each other.
 - Drawing: an image with one column per bar slot; a new present redraws only its slot. A paint
   draws the image in two parts (the slots wrap), the lines and the text. No antialiasing on the
   bars, and every size is whole device pixels.
-- Tick: while the panel shows, a precise timer at half the screen's refresh period (8 ms at
-  60 Hz, 4 ms at 120 Hz and up), so most presents show at the next screen refresh. With only the
+- Tick: while the panel shows, a precise timer at half the refresh period of the screen the game
+  is on (8 ms at 60 Hz, 4 ms at 120 Hz and up), so most presents show at the next screen refresh.
+  It follows a move to another screen and a refresh rate change. With only the
   input panel the timer stays at 16 ms.
 - Upstream's performance overlay (Ctrl+V) no longer draws its frame-time graph; it keeps the FPS,
   the ms, CPU and GPU values and the footer. The change is the graph height and one call in
