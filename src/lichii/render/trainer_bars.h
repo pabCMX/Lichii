@@ -186,16 +186,40 @@ private:
     u64 pushed{};
 };
 
-/// The entries of a history copy (oldest first) that ended after last_end: the frames to add as
-/// bars this tick. At most the BAR_COUNT newest, as older ones would leave the panel at once.
-inline std::span<const Core::FrameTimeHistory::Entry> NewFrames(
-    std::span<const Core::FrameTimeHistory::Entry> entries,
-    Core::FrameTimeHistory::Clock::time_point last_end) {
-    std::size_t first = entries.size();
-    while (first != 0 && entries[first - 1].end > last_end && entries.size() - first < BAR_COUNT) {
-        --first;
+/// What a tick does to the bars.
+struct BarsUpdate {
+    /// Clear the bars before adding fresh: entries since the last bar were lost (the GUI thread
+    /// fell behind more than the history holds), or the history started again (a new game).
+    bool restart;
+    /// The entries to add as bars, oldest first: at most the BAR_COUNT newest.
+    std::span<const Core::FrameTimeHistory::Entry> fresh;
+};
+
+/// Compares a copy of the frame time history (oldest first) with the end of the newest bar
+/// drawn, last_end (nullopt when there is none). End times are steady-clock and strictly rising,
+/// so they number the presents: the bars go on only when last_end is still in the copy. A copy
+/// that does not reach back to last_end gives a restart, never a silent join, so the caller asks
+/// for the whole history when the window it asked for starts after last_end.
+inline BarsUpdate UpdateBars(std::span<const Core::FrameTimeHistory::Entry> entries,
+                             std::optional<Core::FrameTimeHistory::Clock::time_point> last_end) {
+    const auto newest = [&](std::span<const Core::FrameTimeHistory::Entry> from) {
+        return from.subspan(from.size() - std::min(from.size(), BAR_COUNT));
+    };
+    if (!last_end) {
+        return {.restart = false, .fresh = newest(entries)};
     }
-    return entries.subspan(first);
+    if (entries.empty() || entries.back().end < *last_end) {
+        return {.restart = true, .fresh = {}}; // emptied or started again
+    }
+    const auto found = std::lower_bound(
+        entries.begin(), entries.end(), *last_end,
+        [](const Core::FrameTimeHistory::Entry& entry,
+           Core::FrameTimeHistory::Clock::time_point end) { return entry.end < end; });
+    if (found == entries.end() || found->end != *last_end) {
+        return {.restart = true, .fresh = newest(entries)}; // a gap after the last bar
+    }
+    const auto after = std::size_t(found - entries.begin()) + 1;
+    return {.restart = false, .fresh = newest(entries.subspan(after))};
 }
 
 /// Where the bars panel goes over the game image (all in pixels): centred along the bottom edge,

@@ -2739,6 +2739,9 @@ void MainWindow::OnEmulationStopped() {
         bug_report_dialog->StopCapture();
     }
     UndoSessionSpeedChanges();
+    if (trainer_overlay) {
+        trainer_overlay->ResetBars();
+    }
     shutdown_timer.stop();
     emu_terminate_timer.stop();
     if (QtCommon::emu_thread) {
@@ -3737,6 +3740,7 @@ void MainWindow::OnLoadComplete() {
     connect(perf_overlay, &PerformanceOverlay::closed, perf_overlay,
             [this]() { ui->action_Show_Performance_Overlay->setChecked(false); });
     if (trainer_overlay) {
+        trainer_overlay->ResetBars();
         trainer_overlay->Refresh();
     }
 }

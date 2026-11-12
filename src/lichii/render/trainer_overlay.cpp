@@ -10,6 +10,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QRegion>
+#include <QPointer>
 #include <QScreen>
 
 #include "core/core.h"
@@ -28,8 +29,9 @@ using FrameTimeReader = Core::PerfStats::FrameTimeReader;
 /// The bars panel's text line changes at most this often, so it does not flicker.
 constexpr s64 BARS_TEXT_MS = 250;
 /// How far back each tick reads the frame time history: far more than a tick, and the whole
-/// panel at 60 FPS on the first tick.
+/// panel at 60 FPS on the first tick. When the panel is further behind, a tick reads all of it.
 constexpr auto BARS_READ_WINDOW = std::chrono::seconds{2};
+constexpr auto BARS_READ_ALL = std::chrono::hours{24};
 
 s64 NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -75,46 +77,29 @@ struct RawStick {
     std::optional<TrailPoint> raw;
 };
 
-/// One stick of the controllers ReadGamePad reads: the configured deadzone, and the position
-/// before the deadzone and range of the controller whose value is the one the game gets (game).
-/// No raw position while injected is set, or when no controller's value matches (input from the
-/// debug server replaces the stick). The raw position moves in steps of 1/64 of a deflection, so
-/// stick noise does not repaint the panel at each tick.
-RawStick ReadRaw(Core::System& system, Settings::NativeAnalog::Values index,
-                 const Core::HID::AnalogStickState& game, bool injected, s64 now_ms) {
-    // The values can change between ReadGamePad and this read.
-    constexpr s32 TOLERANCE = 512;
+/// The deadzone and the raw position (before the deadzone and range) of the controller that
+/// gives the game its stick: status, which ReadGamePad read with that stick's value. No raw
+/// position while injected (a replay gives the game its stick). The raw position moves in steps
+/// of 1/64 of a deflection, so stick noise does not repaint the panel at each tick.
+/// GetSticksValues has no lock, as in upstream's input settings preview: SetStick can write while
+/// it copies. A mixed read gives at most one wrong dot or ring for one tick; every value is
+/// clamped here (and in StickPoint) so the drawing never leaves the stick circle's box.
+RawStick ReadRaw(const std::optional<Common::Input::StickStatus>& status, bool injected,
+                 s64 now_ms) {
     RawStick result;
-    double best = -1.0;
-    bool first = true;
-    auto& hid = system.HIDCore();
-    for (const auto id : {Core::HID::NpadIdType::Player1, Core::HID::NpadIdType::Handheld}) {
-        const Core::HID::EmulatedController* const controller = hid.GetEmulatedController(id);
-        if (!controller->IsConnected()) {
-            continue;
-        }
-        const Common::Input::StickStatus stick = controller->GetSticksValues()[index];
-        if (first) {
-            result.deadzone = stick.x.properties.deadzone;
-            first = false;
-        }
-        // As EmulatedController::SetStick makes the value the game reads.
-        const s32 x = static_cast<s32>(stick.x.value * Core::HID::HID_JOYSTICK_MAX);
-        const s32 y = static_cast<s32>(stick.y.value * Core::HID::HID_JOYSTICK_MAX);
-        const double size = std::hypot(stick.x.raw_value, stick.y.raw_value);
-        if (std::abs(x - game.x) > TOLERANCE || std::abs(y - game.y) > TOLERANCE || size <= best) {
-            continue;
-        }
-        best = size;
-        result.deadzone = stick.x.properties.deadzone;
-        const auto step = [](float raw) {
-            return static_cast<s32>(std::lround(raw * 64.0f) / 64.0 * TrainerHud::STICK_MAX);
-        };
-        result.raw =
-            TrailPoint{.x = step(stick.x.raw_value), .y = step(stick.y.raw_value), .ms = now_ms};
+    if (!status) {
+        return result;
     }
-    if (injected) {
-        result.raw.reset();
+    const auto unit = [](float value) {
+        return std::isfinite(value) ? std::clamp(value, -1.0f, 1.0f) : 0.0f;
+    };
+    result.deadzone = std::max(unit(status->x.properties.deadzone), 0.0f);
+    if (!injected) {
+        const auto step = [&](float raw) {
+            return static_cast<s32>(std::lround(unit(raw) * 64.0f) / 64.0 * TrainerHud::STICK_MAX);
+        };
+        result.raw = TrailPoint{
+            .x = step(status->x.raw_value), .y = step(status->y.raw_value), .ms = now_ms};
     }
     return result;
 }
@@ -163,13 +148,7 @@ void TrainerOverlay::SetWanted(Panel panel, bool wanted) {
         right_trail.Clear();
     } else {
         bars_wanted = wanted;
-        bars.Clear();
-        last_bar_end = {};
-        bars_stats = {};
-        bars_stats_ms = 0;
-        if (!bars_graph.isNull()) {
-            bars_graph.fill(Qt::transparent);
-        }
+        ClearBars();
     }
     if (!input_wanted && !bars_wanted) {
         Stop();
@@ -186,6 +165,38 @@ void TrainerOverlay::SetWanted(Panel panel, bool wanted) {
     } else {
         Refresh();
     }
+}
+
+void TrainerOverlay::ResetBars() {
+    ClearBars();
+    if (bars_wanted && isVisible()) {
+        update(bars_rect);
+    }
+}
+
+void TrainerOverlay::ClearBars() {
+    bars.Clear();
+    last_bar_end.reset();
+    bars_stats = {};
+    bars_stats_ms = 0;
+    if (!bars_graph.isNull()) {
+        bars_graph.fill(Qt::transparent);
+    }
+}
+
+void TrainerOverlay::WatchScreen() {
+    QScreen* const screen = game_view->screen();
+    if (screen == watched_screen) {
+        return;
+    }
+    if (watched_screen) {
+        disconnect(watched_screen, nullptr, this, nullptr);
+    }
+    watched_screen = screen;
+    if (screen != nullptr) {
+        connect(screen, &QScreen::refreshRateChanged, this, [this] { SetInterval(); });
+    }
+    SetInterval();
 }
 
 void TrainerOverlay::SetInterval() {
@@ -262,6 +273,8 @@ bool TrainerOverlay::Place() {
     if (parentWidget() != top) {
         setParent(top, windowFlags());
     }
+    // The bars' timer follows the refresh rate of the screen the game is on.
+    WatchScreen();
     // The game image inside the render window, from its framebuffer layout (device pixels).
     QRect image = game_view->rect();
     const auto& screen = game_view->GetFramebufferLayout().screen;
@@ -313,9 +326,8 @@ void TrainerOverlay::ReadInput() {
 
     // A replay or its pre-roll gives the game its input, so the real stick is not what it gets.
     const bool injected = view.replaying || view.pre_roll_left != 0;
-    const RawStick left = ReadRaw(system, Settings::NativeAnalog::LStick, view.left, injected, now);
-    const RawStick right =
-        ReadRaw(system, Settings::NativeAnalog::RStick, view.right, injected, now);
+    const RawStick left = ReadRaw(view.left_status, injected, now);
+    const RawStick right = ReadRaw(view.right_status, injected, now);
 
     frame.buttons = view.buttons;
     frame.left_x = view.left.x;
@@ -347,16 +359,24 @@ bool TrainerOverlay::ReadBars() {
     perf.SetFrameTimeHistoryEnabled(true, FrameTimeReader::TrainerBars);
     history_on = true;
     // A copy, taken under the perf stats mutex; the emulation threads never wait on the panel.
-    const auto entries = perf.GetRecentFrameTimes(BARS_READ_WINDOW);
-    const auto fresh = TrainerHud::NewFrames(entries, last_bar_end);
-    for (const auto& entry : fresh) {
+    auto entries = perf.GetRecentFrameTimes(BARS_READ_WINDOW);
+    if (last_bar_end && !entries.empty() && entries.front().end > *last_bar_end) {
+        // Behind by more than the window: all the history holds, to find the last bar in it.
+        entries = perf.GetRecentFrameTimes(BARS_READ_ALL);
+    }
+    const TrainerHud::BarsUpdate next = TrainerHud::UpdateBars(entries, last_bar_end);
+    bool changed = next.restart;
+    if (next.restart) {
+        ClearBars();
+    }
+    for (const auto& entry : next.fresh) {
         const size_t slot = bars.FirstSlot();
         bars.Push(entry.ms);
         TrainerHud::PaintBarSlot(bars_graph, bars_layout, bars, slot);
     }
-    bool changed = !fresh.empty();
-    if (changed) {
-        last_bar_end = fresh.back().end;
+    if (!next.fresh.empty()) {
+        last_bar_end = next.fresh.back().end;
+        changed = true;
     }
     const s64 now = NowMs();
     if (now - bars_stats_ms >= BARS_TEXT_MS) {
