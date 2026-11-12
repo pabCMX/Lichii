@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cmath>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -36,13 +38,38 @@ TEST_CASE("Bars use a fixed 50 ms scale and clip longer frames", "[trainer_hud]"
     REQUIRE(LineRow(LINE_30_MS, 150) == 150 - MeasureBar(LINE_30_MS, 150).height);
 }
 
-TEST_CASE("Bar pitch is whole device pixels with a gap", "[trainer_hud]") {
-    REQUIRE(BarPixelsFor(1.0).pitch == 4);
-    REQUIRE(BarPixelsFor(1.0).bar == 3);
-    REQUIRE(BarPixelsFor(1.5).pitch == 6);
-    REQUIRE(BarPixelsFor(1.5).bar == 4); // the gap rounds to 2
-    REQUIRE(BarPixelsFor(2.0).pitch == 8);
-    REQUIRE(BarPixelsFor(2.0).bar == 6);
+TEST_CASE("Bar pitch scales to whole device pixels with a gap", "[trainer_hud]") {
+    const auto check = [](double unit, int pitch, int bar) {
+        const BarPixels pixels = BarPixelsFor(unit);
+        REQUIRE(pixels.pitch == pitch);
+        REQUIRE(pixels.bar == bar);
+    };
+    check(0.75, 3, 2); // the smallest image scale: still a gap
+    check(1.0, 4, 3);  // 720p
+    check(1.5, 6, 4);  // 1080p, or 720p at a device pixel ratio of 1.5
+    check(2.0, 8, 6);  // 1440p
+    check(3.0, 12, 9); // 2160p
+    check(1.1, 4, 3);  // a gap under half a pixel still keeps 1 px
+    // Never under 2 px.
+    REQUIRE(BarPixelsFor(0.25).pitch == 2);
+}
+
+TEST_CASE("The bars panel scales with the game image", "[trainer_hud]") {
+    REQUIRE(PanelScale(450) == 0.75);
+    REQUIRE(PanelScale(720) == 1.0);
+    REQUIRE(PanelScale(2160) == 3.0);
+    REQUIRE(PanelScale(4320) == 4.0);
+
+    const BarsGeometry one = BarsGeometryFor(1.0);
+    REQUIRE(one.graph.width == 480);
+    REQUIRE(one.graph.height == 100);
+    REQUIRE(one.width == 512);
+    REQUIRE(one.height == 132);
+    const BarsGeometry three = BarsGeometryFor(3.0);
+    REQUIRE(three.graph.width == int(BAR_COUNT) * 12);
+    REQUIRE(three.graph.height == 300);
+    REQUIRE(three.width == 1536);
+    REQUIRE(three.height == 396);
 }
 
 TEST_CASE("Frame bars keep the last 120 frames, newest at the right", "[trainer_hud]") {
@@ -131,4 +158,34 @@ TEST_CASE("The bars panel is centred at the bottom, above the input panel if the
     const Box tiny =
         PlaceBars({.x = 0, .y = 0, .width = 400, .height = 300}, 514, 132, 12, std::nullopt, 6);
     REQUIRE(tiny.x == 12);
+}
+
+TEST_CASE("Scaled panels sit side by side on 16:9 images and stack on small ones",
+          "[trainer_hud]") {
+    // As the overlay places them at a device pixel ratio of 1: the input panel from PanelRect.
+    const auto place = [](int width, int height) {
+        const Box image{.x = 0, .y = 0, .width = width, .height = height};
+        const double scale = PanelScale(height);
+        const int margin = int(std::lround(16.0 * scale));
+        const Box input{.x = margin,
+                        .y = height - margin - int(std::lround(170.0 * scale)),
+                        .width = int(std::lround(344.0 * scale)),
+                        .height = int(std::lround(170.0 * scale))};
+        const BarsGeometry geometry = BarsGeometryFor(scale);
+        const Box bars = PlaceBars(image, geometry.width, geometry.height, margin, input,
+                                   int(std::lround(8.0 * scale)));
+        // Never overlapping: beside the input panel or above it.
+        REQUIRE((bars.x >= input.x + input.width || bars.y + bars.height <= input.y));
+        return std::pair{bars, input};
+    };
+    for (const auto [width, height] : {std::pair{1280, 720}, std::pair{1920, 1080},
+                                       std::pair{2560, 1440}, std::pair{3840, 2160}}) {
+        const auto [bars, input] = place(width, height);
+        const double scale = PanelScale(height);
+        REQUIRE(bars.x == (width - bars.width) / 2);
+        REQUIRE(bars.y + bars.height == height - int(std::lround(16.0 * scale)));
+        REQUIRE(bars.width == int(std::lround(512 * scale)));
+    }
+    const auto [stacked, input] = place(800, 450);
+    REQUIRE(stacked.y + stacked.height < input.y);
 }

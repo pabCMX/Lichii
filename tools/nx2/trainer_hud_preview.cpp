@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Paints the trainer overlay's panels (input, frame-time bars) over a stand-in game image at
-// 1280x720, 800x450 and 3840x2160 from made-up data, so their layout can be checked on a machine
-// without a display. Not part of the build:
+// 800x450, 1280x720, 1920x1080, 2560x1440 and 3840x2160 from made-up data, so their layout can be
+// checked on a machine without a display. Not part of the build:
 //
 //   g++ -std=c++20 -fPIC -Isrc $(pkg-config --cflags Qt6Gui) tools/nx2/trainer_hud_preview.cpp
 //       src/lichii/render/trainer_hud.cpp $(pkg-config --libs Qt6Gui) -o /tmp/trainer_hud_preview
@@ -43,9 +43,9 @@ void Save(const QImage& image, const QString& path) {
     }
 }
 
-/// The bars panel alone at a device pixel ratio, as the overlay paints it.
-QImage BarsPanel(const FrameBars& bars, double ratio) {
-    const BarsLayout layout = LayoutBars(ratio);
+/// The bars panel alone at unit device pixels per layout unit, as the overlay paints it.
+QImage BarsPanel(const FrameBars& bars, double unit) {
+    const BarsLayout layout = LayoutBars(unit);
     QImage graph{layout.graph.size(), QImage::Format_ARGB32_Premultiplied};
     PaintBarSlots(graph, layout, bars);
     QImage panel{layout.size, QImage::Format_ARGB32_Premultiplied};
@@ -86,7 +86,7 @@ QImage Scene(QSize image_size) {
     return image;
 }
 
-/// The game image with the panels placed as the overlay places them (ratio 1). bars or frame may
+/// The game image with the panels placed and scaled as the overlay does it (device pixel ratio 1). bars or frame may
 /// be null to leave that panel out.
 void Render(const QString& path, QSize image_size, const InputFrame* frame,
             const FrameBars* bars) {
@@ -103,7 +103,7 @@ void Render(const QString& path, QSize image_size, const InputFrame* frame,
         painter.restore();
     }
     if (bars != nullptr) {
-        const QImage bars_panel = BarsPanel(*bars, 1.0);
+        const QImage bars_panel = BarsPanel(*bars, PanelScale(image_size.height()));
         const QRect place = BarsRect(image_rect, bars_panel.size(),
                                      frame != nullptr ? std::optional{panel} : std::nullopt);
         painter.drawImage(place.topLeft(), bars_panel);
@@ -221,6 +221,8 @@ int main(int argc, char** argv) {
     Render(out + QStringLiteral("/both-720-bars-alone.png"), {1280, 720}, nullptr, &mix);
     Render(out + QStringLiteral("/both-720.png"), {1280, 720}, &deadzone, &mix);
     Render(out + QStringLiteral("/both-450-stacked.png"), {800, 450}, &deadzone, &mix);
+    Render(out + QStringLiteral("/both-1080.png"), {1920, 1080}, &deadzone, &mix);
+    Render(out + QStringLiteral("/both-1440.png"), {2560, 1440}, &deadzone, &mix);
     Render(out + QStringLiteral("/both-2160.png"), {3840, 2160}, &recording, &mix);
     return 0;
 }

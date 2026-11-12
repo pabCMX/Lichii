@@ -277,9 +277,11 @@ bool TrainerOverlay::Place() {
     QRect target = input_wanted ? input : QRect{};
     QRect bars_global;
     if (bars_wanted) {
+        // Grows with the game image like the input panel, in whole device pixels.
         const qreal ratio = devicePixelRatioF();
-        if (bars_layout.ratio != ratio) {
-            bars_layout = TrainerHud::LayoutBars(ratio);
+        const double unit = TrainerHud::PanelScale(image.height()) * ratio;
+        if (bars_layout.unit != unit) {
+            bars_layout = TrainerHud::LayoutBars(unit);
             bars_graph = QImage{bars_layout.graph.size(), QImage::Format_ARGB32_Premultiplied};
             TrainerHud::PaintBarSlots(bars_graph, bars_layout, bars);
         }

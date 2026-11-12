@@ -65,11 +65,61 @@ struct BarPixels {
     int bar;   ///< device pixels of bar; the rest of the pitch is the gap
 };
 
-/// BAR_PITCH and BAR_GAP in whole device pixels at a device pixel ratio.
-inline BarPixels BarPixelsFor(double ratio) {
-    const int pitch = std::max(2, int(std::lround(BAR_PITCH * ratio)));
-    const int gap = std::max(1, int(std::lround(BAR_GAP * ratio)));
+/// BAR_PITCH and BAR_GAP in whole device pixels at unit device pixels per layout unit (the game
+/// image's scale times the device pixel ratio). The pitch is never under 2 px; the gap is at least
+/// 1 px while the bar is 3 px or wider, so single frames stay apart.
+inline BarPixels BarPixelsFor(double unit) {
+    const int pitch = std::max(2, int(std::lround(BAR_PITCH * unit)));
+    int gap = int(std::lround(BAR_GAP * unit));
+    if (pitch - gap >= 3) {
+        gap = std::max(gap, 1);
+    }
     return {.pitch = pitch, .bar = pitch - gap};
+}
+
+/// A rectangle in pixels.
+struct Box {
+    int x;
+    int y;
+    int width;
+    int height;
+};
+
+/// Layout units to pixels for a game image image_height pixels high: one unit is a pixel at 720p.
+/// Both panels use it, so they grow together with the game image.
+inline double PanelScale(int image_height) {
+    return std::clamp(image_height / 720.0, 0.75, 4.0);
+}
+
+/// The bars panel in layout units.
+constexpr double BARS_PADDING = 6.0;
+constexpr double BARS_TEXT_HEIGHT = 16.0;
+constexpr double BARS_TEXT_GAP = 4.0;
+constexpr double BARS_GRAPH_HEIGHT = 100.0;
+/// Right of the graph, for the "60" and "30" labels.
+constexpr double BARS_LABEL_WIDTH = 20.0;
+
+/// The bars panel in whole device pixels: graph is the bars' rectangle inside the panel.
+struct BarsGeometry {
+    BarPixels pixels;
+    Box graph;
+    int width;
+    int height;
+};
+
+/// The bars panel at unit device pixels per layout unit. The graph is BAR_COUNT pitches wide.
+inline BarsGeometry BarsGeometryFor(double unit) {
+    const auto pixels_of = [unit](double units) { return int(std::lround(units * unit)); };
+    const BarPixels pixels = BarPixelsFor(unit);
+    const int padding = pixels_of(BARS_PADDING);
+    const Box graph{.x = padding,
+                    .y = padding + pixels_of(BARS_TEXT_HEIGHT + BARS_TEXT_GAP),
+                    .width = int(BAR_COUNT) * pixels.pitch,
+                    .height = pixels_of(BARS_GRAPH_HEIGHT)};
+    return {.pixels = pixels,
+            .graph = graph,
+            .width = graph.x + graph.width + pixels_of(BARS_LABEL_WIDTH) + padding,
+            .height = graph.y + graph.height + padding};
 }
 
 struct BarStats {
@@ -147,14 +197,6 @@ inline std::span<const Core::FrameTimeHistory::Entry> NewFrames(
     }
     return entries.subspan(first);
 }
-
-/// A rectangle in pixels.
-struct Box {
-    int x;
-    int y;
-    int width;
-    int height;
-};
 
 /// Where the bars panel goes over the game image (all in pixels): centred along the bottom edge,
 /// margin pixels above it like the input panel, and never left of the margin. When the input
