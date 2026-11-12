@@ -305,9 +305,11 @@ saved.
 | Ctrl+F1 | Toggle Trainer Overlay | Input | Bottom-left of the game image |
 | Ctrl+F11 | Toggle Frame Time Bars | Frame-time bars | Centred along the bottom edge |
 
-The bars panel has the same bottom margin as the input panel. When both show and the game image
-is too narrow for them side by side, the bars panel goes above the input panel, so they never
-overlap (`TrainerHud::PlaceBars`).
+Both panels grow with the game image by the same scale (`TrainerHud::PanelScale`): the image
+height over 720, from 0.75 to 4. Sizes below are at 720p. The bars panel has the same bottom
+margin as the input panel. When both show and the game image is too narrow for them side by side,
+the bars panel goes above the input panel, so they never overlap (`TrainerHud::PlaceBars`, with
+the scaled sizes). At 16:9 they are side by side from 720p to 4K.
 
 ### Input panel
 
@@ -319,9 +321,10 @@ overlap (`TrainerHud::PlaceBars`).
   only square corners pass 1.000. Both numbers are right-aligned with fixed-width digits, so they
   do not move when digits change.
 - Deadzone: a red ring in each stick circle at the configured deadzone of the controller that
-  feeds the game. A small pink dot is the raw stick (before the deadzone and range) when it is
-  away from the white dot of what the game gets. Inside the deadzone the game gets 0, the white
-  dot is hollow at the centre and the pink dot moves. The source is
+  feeds the game, drawn over the game's dot. A small pink dot is the raw stick (before the
+  deadzone and range) when it is away from the white dot of what the game gets. Inside the
+  deadzone the game gets 0: the white dot becomes a small hollow dot inside the ring, and the pink
+  dot moves. The source is
   `EmulatedController::GetSticksValues()`: `raw_value`, `value` and `properties.deadzone` per
   axis, as the input settings preview uses them. The pink dot shows only for the controller whose
   `value` matches the stick the game gets, and never during a replay or its pre-roll: then the
@@ -340,12 +343,16 @@ overlap (`TrainerHud::PlaceBars`).
 
 ### Frame-time bars panel
 
-The model is the SteamVR frame timing graph. One bar per present, all of the same width: a 3 px
-bar and a 1 px gap (device-independent pixels), 120 bars, so 480 px hold 2 s at 60 FPS. Each new
+The model is the SteamVR frame timing graph. One bar per present, all of the same width: at 720p a
+3 px bar and a 1 px gap, 120 bars, so 480 px hold 2 s at 60 FPS. The pitch is 4 px times the
+image scale times the device pixel ratio, rounded to whole device pixels: never under 2 px, and
+with a gap of at least 1 px while the bar is 3 px or wider (`TrainerHud::BarPixelsFor`). At 4K
+the pitch is 12 px. The height, text, line labels and clip mark scale the same way; the bar count
+stays 120. Each new
 present adds a bar at the right edge and moves the others left by one bar. Presents that arrived
 between two ticks are all drawn, in order.
 
-- Height: a fixed scale from 0 to 50 ms over 100 px. It never rescales. A frame over 50 ms is
+- Height: a fixed scale from 0 to 50 ms over 100 px at 720p. It never rescales. A frame over 50 ms is
   drawn at full height with a white cap on top.
 - Colour: green up to 17.5 ms (60 FPS), orange up to 34.0 ms (30 FPS), red above. The margins
   over 16.67 and 33.33 ms keep normal pacing noise in its colour. The limits are constants in
