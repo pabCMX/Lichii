@@ -296,31 +296,88 @@ it is destroyed:
 
 ## Trainer overlay
 
-Ctrl+F1 ("Toggle Trainer Overlay" in the hotkey settings) shows or hides an input display over
-the bottom-left of the game image. It is off at start and the state is not saved.
+The trainer overlay is a click-through window over the game image with two panels. Each panel has
+its own hotkey and shows alone or with the other. Both are off at start, and the state is not
+saved.
+
+| Hotkey | Name in the hotkey settings | Panel | Place |
+|---|---|---|---|
+| Ctrl+F1 | Toggle Trainer Overlay | Input | Bottom-left of the game image |
+| Ctrl+F11 | Toggle Frame Time Bars | Frame-time bars | Centred along the bottom edge |
+
+The bars panel has the same bottom margin as the input panel. When both show and the game image
+is too narrow for them side by side, the bars panel goes above the input panel, so they never
+overlap (`TrainerHud::PlaceBars`).
+
+### Input panel
 
 - It shows every npad button the game reads (A B X Y, L R ZL ZR, Plus, Minus, the D-pad, the stick
   clicks, SL and SR), both sticks as a dot in a circle with a 0.5 s trail, and per stick the angle
-  and magnitude. The angle is in compass degrees: 0 is up (the stick pushed forward), turning
-  clockwise, so 90 is right. `---` means centred. The magnitude is the length over a full
-  deflection, after the deadzone and range settings; only square corners pass 1.00.
+  and magnitude. The angle is in compass degrees to hundredths (`179.65°`): 0 is up (the stick
+  pushed forward), turning clockwise, so 90 is right. `---` means centred. The magnitude is the
+  length over a full deflection to thousandths (`0.732`), after the deadzone and range settings;
+  only square corners pass 1.000. Both numbers are right-aligned with fixed-width digits, so they
+  do not move when digits change.
+- Deadzone: a red ring in each stick circle at the configured deadzone of the controller that
+  feeds the game. A small pink dot is the raw stick (before the deadzone and range) when it is
+  away from the white dot of what the game gets. Inside the deadzone the game gets 0, the white
+  dot is hollow at the centre and the pink dot moves. The source is
+  `EmulatedController::GetSticksValues()`: `raw_value`, `value` and `properties.deadzone` per
+  axis, as the input settings preview uses them. The pink dot shows only for the controller whose
+  `value` matches the stick the game gets, and never during a replay or its pre-roll: then the
+  game's stick comes from the debug server, so only the ring and the white dot show. The pink dot
+  moves in steps of 1/64 of a deflection, so stick noise does not repaint the panel.
 - `REC n` while `input_record` records (Ctrl+F8 or a client), with the presents recorded so far.
-  It is the count `input_record` `status` and `stop` give. While the overlay runs, it also sets
-  the status bar's `REC INPUT n presents` at each change, so both show the same number.
+  It is the count `input_record` `status` and `stop` give. While the input panel shows, it also
+  sets the status bar's `REC INPUT n presents` at each change, so both show the same number.
   `REPLAY` while an `input` or `input_sequence` call holds input.
 - Data: `Nx2Debug::ReadGamePad`, the getters the npad updater and `input_record` read, so a replay
-  shows too. It is read on a 60 Hz GUI timer that runs only while the overlay is on and can
-  show. The present
-  path does no work for it. The trail takes one point per present.
+  shows too. The present path does no work for it. The trail takes one point per present.
 - Cost while on: the read, and a repaint only when the input changes or a trail fades. The idle
   panel is cached as an image; a repaint measured 0.33 ms at 720p and 1.3 ms at 4K (devbox Xeon,
-  both sticks moving). During a replay each read runs the replay's step lookup under the injector
-  mutex, a few microseconds.
+  both sticks moving, before the deadzone ring). During a replay each read runs the replay's step
+  lookup under the injector mutex, a few microseconds.
+
+### Frame-time bars panel
+
+The model is the SteamVR frame timing graph. One bar per present, all of the same width: a 3 px
+bar and a 1 px gap (device-independent pixels), 120 bars, so 480 px hold 2 s at 60 FPS. Each new
+present adds a bar at the right edge and moves the others left by one bar. Presents that arrived
+between two ticks are all drawn, in order.
+
+- Height: a fixed scale from 0 to 50 ms over 100 px. It never rescales. A frame over 50 ms is
+  drawn at full height with a white cap on top.
+- Colour: green up to 17.5 ms (60 FPS), orange up to 34.0 ms (30 FPS), red above. The margins
+  over 16.67 and 33.33 ms keep normal pacing noise in its colour. The limits are constants in
+  `src/lichii/render/trainer_bars.h`.
+- Two thin white lines at 16.67 ms (`60`) and 33.33 ms (`30`), drawn over the bars.
+- The text line: the mean frame time, FPS and the worst frame of the bars shown. It changes at
+  most 4 times a second.
+- Data: upstream's `FrameTimeHistory` (`PerfStats::GetRecentFrameTimes`), one entry per present
+  with its end time and the present-to-present interval. Each tick copies the last 2 s under the
+  perf stats mutex and adds the entries newer than the last bar. The history records while any
+  reader wants it (`PerfStats::FrameTimeReader`): the panel and upstream's performance overlay
+  cannot switch it off under each other.
+- Drawing: an image with one column per bar slot; a new present redraws only its slot. A paint
+  draws the image in two parts (the slots wrap), the lines and the text. No antialiasing on the
+  bars, and every size is whole device pixels.
+- Tick: while the panel shows, a precise timer at half the screen's refresh period (8 ms at
+  60 Hz, 4 ms at 120 Hz and up), so most presents show at the next screen refresh. With only the
+  input panel the timer stays at 16 ms.
+- Upstream's performance overlay (Ctrl+V) no longer draws its frame-time graph; it keeps the FPS,
+  the ms, CPU and GPU values and the footer. The change is the graph height and one call in
+  `performance_overlay.cpp`.
+
+### Window
+
 - It is a separate click-through tool window (`Qt::WindowTransparentForInput`, no focus, no
-  activation), owned by the window that shows the game. It hides with no game, while that window
-  is minimised, and in exclusive fullscreen. Debug-server screenshots read the game's frame, so
-  they never contain it. On Wayland the compositor places it.
-- `tools/nx2/trainer_hud_preview.cpp` renders the panel to PNG without a display.
+  activation), owned by the window that shows the game, and covers the panels that show. It hides
+  with no game, while that window is minimised, and in exclusive fullscreen. Debug-server
+  screenshots read the game's frame, so they never contain it. On Wayland the compositor places
+  it.
+- The timer runs only while a panel is on and can show. A panel that is off does no work; the
+  bars panel lets go of the frame time history when it is off or hidden.
+- `tools/nx2/trainer_hud_preview.cpp` renders both panels to PNG without a display.
 
 ## Live switches
 
