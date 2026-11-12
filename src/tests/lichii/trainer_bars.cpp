@@ -105,30 +105,88 @@ TEST_CASE("Frame bars keep the last 120 frames, newest at the right", "[trainer_
     REQUIRE(bars.Size() == 0);
 }
 
-TEST_CASE("New frames are the entries after the last drawn one", "[trainer_hud]") {
-    using namespace std::chrono_literals;
-    const Clock::time_point start{};
-    std::vector<Entry> entries;
-    for (int i = 1; i <= 5; ++i) {
-        entries.push_back({start + i * 16ms, 16.0f + float(i)});
-    }
-    // First tick: everything.
-    REQUIRE(NewFrames(entries, Clock::time_point{}).size() == 5);
-    // Two presents arrived since the frame that ended at 48 ms: both, in order.
-    const auto fresh = NewFrames(entries, start + 48ms);
-    REQUIRE(fresh.size() == 2);
-    REQUIRE(fresh[0].ms == 20.0f);
-    REQUIRE(fresh[1].ms == 21.0f);
-    REQUIRE(NewFrames(entries, start + 80ms).empty());
+namespace {
 
-    // More than the panel holds: only the newest BAR_COUNT.
-    std::vector<Entry> many;
-    for (int i = 1; i <= 300; ++i) {
-        many.push_back({start + i * 1ms, float(i)});
+/// count presents at 30 FPS, the first one ending at first_ms.
+std::vector<Entry> Presents(int first_ms, int count) {
+    std::vector<Entry> entries;
+    for (int i = 0; i < count; ++i) {
+        entries.push_back({Clock::time_point{} + std::chrono::milliseconds{first_ms + i * 33}, 33.0f});
     }
-    const auto capped = NewFrames(many, Clock::time_point{});
-    REQUIRE(capped.size() == BAR_COUNT);
-    REQUIRE(capped.front().ms == float(300 - BAR_COUNT + 1));
+    return entries;
+}
+
+std::vector<Entry> Join(std::vector<Entry> a, const std::vector<Entry>& b) {
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+}
+
+} // Anonymous namespace
+
+TEST_CASE("New bars are the entries after the last bar, in order", "[trainer_hud]") {
+    const std::vector<Entry> entries = Presents(1000, 5);
+    // First tick: everything, no restart.
+    const BarsUpdate first = UpdateBars(entries, std::nullopt);
+    REQUIRE_FALSE(first.restart);
+    REQUIRE(first.fresh.size() == 5);
+    // Two presents since the bar that ended at the third entry: both, in order.
+    const BarsUpdate two = UpdateBars(entries, entries[2].end);
+    REQUIRE_FALSE(two.restart);
+    REQUIRE(two.fresh.size() == 2);
+    REQUIRE(two.fresh[0].end == entries[3].end);
+    REQUIRE(two.fresh[1].end == entries[4].end);
+    REQUIRE(UpdateBars(entries, entries[4].end).fresh.empty());
+    // More than the panel holds: only the newest BAR_COUNT, still no restart.
+    const std::vector<Entry> many = Presents(1000, 300);
+    const BarsUpdate capped = UpdateBars(many, many[0].end);
+    REQUIRE_FALSE(capped.restart);
+    REQUIRE(capped.fresh.size() == BAR_COUNT);
+    REQUIRE(capped.fresh.back().end == many.back().end);
+}
+
+TEST_CASE("Bars lost while the GUI thread stalls start the panel again, never a silent join",
+          "[trainer_hud]") {
+    // 120 bars shown, the last one ends at shown.back(). Then the GUI thread stalls 3 s while the
+    // game presents at 30 FPS: 90 presents.
+    const std::vector<Entry> shown = Presents(0, 120);
+    const auto last = shown.back().end;
+    const std::vector<Entry> stall = Presents(120 * 33, 90);
+
+    // A 2 s copy holds only the last 60 or so: the last bar is not in it, so it is a gap.
+    const std::vector<Entry> window(stall.end() - 60, stall.end());
+    const BarsUpdate cut = UpdateBars(window, last);
+    REQUIRE(cut.restart);
+    REQUIRE(cut.fresh.size() == 60);
+
+    // The whole history still holds the last bar: all 90 go on after it.
+    const BarsUpdate whole = UpdateBars(Join(shown, stall), last);
+    REQUIRE_FALSE(whole.restart);
+    REQUIRE(whole.fresh.size() == 90);
+    REQUIRE(whole.fresh.front().end == stall.front().end);
+
+    // The history overflowed (2048 entries, all after the last bar): start again from the newest.
+    const BarsUpdate overflow =
+        UpdateBars(Presents(120 * 33 + 5000, int(Core::FrameTimeHistory::Capacity)), last);
+    REQUIRE(overflow.restart);
+    REQUIRE(overflow.fresh.size() == BAR_COUNT);
+}
+
+TEST_CASE("A history that started again resets the bars; a second reader does not",
+          "[trainer_hud]") {
+    const std::vector<Entry> shown = Presents(0, 120);
+    const auto last = shown.back().end;
+    // Emptied (a new game's history before its first present).
+    REQUIRE(UpdateBars({}, last).restart);
+    // Its newest entry is older than the last bar.
+    REQUIRE(UpdateBars(std::span{shown}.first(50), last).restart);
+    // A new game's entries, all after the last bar: the last bar is not among them.
+    const BarsUpdate next_game = UpdateBars(Presents(10'000, 30), last);
+    REQUIRE(next_game.restart);
+    REQUIRE(next_game.fresh.size() == 30);
+    // The performance overlay starts reading too: the history is not cleared, so the bars go on.
+    const BarsUpdate second_reader = UpdateBars(Join(shown, Presents(120 * 33, 2)), last);
+    REQUIRE_FALSE(second_reader.restart);
+    REQUIRE(second_reader.fresh.size() == 2);
 }
 
 TEST_CASE("The bars panel is centred at the bottom, above the input panel if they collide",
@@ -178,7 +236,7 @@ TEST_CASE("Scaled panels sit side by side on 16:9 images and stack on small ones
         REQUIRE((bars.x >= input.x + input.width || bars.y + bars.height <= input.y));
         return std::pair{bars, input};
     };
-    for (const auto [width, height] : {std::pair{1280, 720}, std::pair{1920, 1080},
+    for (const auto& [width, height] : {std::pair{1280, 720}, std::pair{1920, 1080},
                                        std::pair{2560, 1440}, std::pair{3840, 2160}}) {
         const auto [bars, input] = place(width, height);
         const double scale = PanelScale(height);

@@ -90,9 +90,12 @@ void RoundButton(QPainter& painter, Layer layer, QPointF centre, bool held, cons
     Button(painter, layer, QRectF{centre.x() - r, centre.y() - r, 2 * r, 2 * r}, held, label, true);
 }
 
+/// A stick position in the circle at centre. Clamped to the circle's box, so a wrong value (an
+/// unlocked read mixed with a write) cannot draw outside the panel.
 QPointF StickPoint(QPointF centre, s32 x, s32 y) {
+    const auto axis = [](s32 value) { return std::clamp(value / STICK_MAX, -1.0, 1.0); };
     // Screen y grows down; the npad's y grows up.
-    return centre + QPointF{x / STICK_MAX * STICK_RADIUS, -y / STICK_MAX * STICK_RADIUS};
+    return centre + QPointF{axis(x) * STICK_RADIUS, -axis(y) * STICK_RADIUS};
 }
 
 /// A stick as a dot in a circle, with the trail of its last positions; the circle lights while
@@ -115,7 +118,7 @@ void Stick(QPainter& painter, Layer layer, QPointF centre, s32 x, s32 y, float d
         painter.setBrush(QColor{255, 202, 40, 60});
         painter.drawEllipse(centre, STICK_RADIUS, STICK_RADIUS);
     }
-    const double deadzone_radius = std::min(double(deadzone), 1.0) * STICK_RADIUS;
+    const double deadzone_radius = std::clamp(double(deadzone), 0.0, 1.0) * STICK_RADIUS;
     if (deadzone > 0.0f) {
         QColor fill = DEADZONE;
         fill.setAlpha(45);

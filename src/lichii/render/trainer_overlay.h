@@ -4,8 +4,11 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 
 #include <QImage>
+#include <QPointer>
+#include <QScreen>
 #include <QTimer>
 #include <QWidget>
 
@@ -44,6 +47,10 @@ public:
     /// loaded and on show, hide and window state events of the game's windows.
     void Refresh();
 
+    /// Empties the bars panel (bars, text, the history position). Called when a game stops and
+    /// when one has loaded, so no game shows another's bars.
+    void ResetBars();
+
 signals:
     /// The REC state the input panel shows changed, so the status bar can show the same count at
     /// once.
@@ -61,6 +68,9 @@ private:
     bool Place();
     /// The timer's interval for the panels that are wanted.
     void SetInterval();
+    /// Follows the screen the game is on and its refresh rate changes, for SetInterval.
+    void WatchScreen();
+    void ClearBars();
     void ReadInput();
     /// Adds the presents since the last tick as bars; true when the panel must repaint.
     bool ReadBars();
@@ -71,6 +81,7 @@ private:
     QTimer timer;
     /// The top-level window whose events start the timer again.
     QWidget* watched_top{};
+    QPointer<QScreen> watched_screen;
     bool input_wanted{};
     bool bars_wanted{};
     /// Each panel's place in this window, in its pixels.
@@ -91,8 +102,8 @@ private:
     TrainerHud::BarsLayout bars_layout{};
     /// The bars, one column per FrameBars slot (TrainerHud::PaintBarSlots).
     QImage bars_graph;
-    /// The end of the newest present already in bars.
-    Core::FrameTimeHistory::Clock::time_point last_bar_end{};
+    /// The end of the newest present already in bars (TrainerHud::UpdateBars); none when empty.
+    std::optional<Core::FrameTimeHistory::Clock::time_point> last_bar_end;
     /// The text line's stats, taken at most every BARS_TEXT_MS.
     TrainerHud::BarStats bars_stats{};
     s64 bars_stats_ms{};
