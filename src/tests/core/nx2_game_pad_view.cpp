@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <chrono>
 #include <thread>
 
@@ -61,6 +62,35 @@ TEST_CASE("The trainer overlay reads what the game is given from both controller
     REQUIRE((view.buttons & (NpadButton::A | NpadButton::ZL)) == (NpadButton::A | NpadButton::ZL));
     REQUIRE(view.left.x == 20000);
     REQUIRE(view.right.y == 30000);
+    REQUIRE(view.left_status.has_value());
+    REQUIRE(view.right_status.has_value());
+}
+
+TEST_CASE("The trainer overlay's raw stick and deadzone come from the controller the game reads",
+          "[core][nx2_debug_server]") {
+    using Core::HID::AnalogStickState;
+    using Core::Nx2Debug::PadStick;
+    using Core::Nx2Debug::PickPadStick;
+    const auto stick = [](s32 game_x, float raw_x, float deadzone) {
+        PadStick pad{.game = AnalogStickState{.x = game_x, .y = 0}, .status = {}};
+        pad.status.x.raw_value = raw_x;
+        pad.status.x.properties.deadzone = deadzone;
+        return pad;
+    };
+    REQUIRE_FALSE(PickPadStick({}));
+
+    // Player 1 (deadzone 0.1) gives the game the larger value. Handheld (deadzone 0.6) has the
+    // larger raw deflection and a value only 200 units away: its raw dot and ring must not be
+    // drawn around Player 1's value.
+    const std::array both{stick(10000, 0.40f, 0.1f), stick(9800, 0.85f, 0.6f)};
+    const auto pick = PickPadStick(both);
+    REQUIRE(pick == 0u);
+    REQUIRE(both[*pick].status.x.properties.deadzone == 0.1f);
+
+    // The later controller wins only with a larger value; on a tie (both inside their deadzones)
+    // the first one gives the ring.
+    REQUIRE(PickPadStick(std::array{stick(9800, 0.4f, 0.1f), stick(10000, 0.9f, 0.6f)}) == 1u);
+    REQUIRE(PickPadStick(std::array{stick(0, 0.05f, 0.1f), stick(0, 0.5f, 0.6f)}) == 0u);
 }
 
 TEST_CASE("The trainer overlay's REC count is the recorder's own", "[core][nx2_debug_server]") {

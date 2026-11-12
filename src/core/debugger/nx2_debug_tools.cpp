@@ -2332,9 +2332,9 @@ GamePadView ReadGamePad(System& system) {
                 recorder.anchor && first > *recorder.anchor + 1 ? first - (*recorder.anchor + 1) : 0;
         }
     }
-    const auto size = [](const HID::AnalogStickState& stick) {
-        return s64{stick.x} * stick.x + s64{stick.y} * stick.y;
-    };
+    std::array<PadStick, 2> left{};
+    std::array<PadStick, 2> right{};
+    std::size_t connected = 0;
     auto& hid = system.HIDCore();
     for (const auto id : {HID::NpadIdType::Player1, HID::NpadIdType::Handheld}) {
         const HID::EmulatedController* const controller = hid.GetEmulatedController(id);
@@ -2343,14 +2343,33 @@ GamePadView ReadGamePad(System& system) {
         }
         view.buttons |= controller->GetNpadButtons().raw;
         const HID::AnalogSticks sticks = controller->GetSticks();
-        if (size(sticks.left) > size(view.left)) {
-            view.left = sticks.left;
-        }
-        if (size(sticks.right) > size(view.right)) {
-            view.right = sticks.right;
-        }
+        const HID::SticksValues values = controller->GetSticksValues();
+        left[connected] = {sticks.left, values[Settings::NativeAnalog::LStick]};
+        right[connected] = {sticks.right, values[Settings::NativeAnalog::RStick]};
+        ++connected;
+    }
+    if (const auto pick = PickPadStick(std::span{left}.first(connected))) {
+        view.left = left[*pick].game;
+        view.left_status = left[*pick].status;
+    }
+    if (const auto pick = PickPadStick(std::span{right}.first(connected))) {
+        view.right = right[*pick].game;
+        view.right_status = right[*pick].status;
     }
     return view;
+}
+
+std::optional<std::size_t> PickPadStick(std::span<const PadStick> sticks) {
+    const auto size = [](const HID::AnalogStickState& stick) {
+        return s64{stick.x} * stick.x + s64{stick.y} * stick.y;
+    };
+    std::optional<std::size_t> pick;
+    for (std::size_t i = 0; i < sticks.size(); ++i) {
+        if (!pick || size(sticks[i].game) > size(sticks[*pick].game)) {
+            pick = i;
+        }
+    }
+    return pick;
 }
 
 u64 ParseShaderHash(std::string_view text) {
