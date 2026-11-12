@@ -80,7 +80,7 @@ void PerfStats::EndSystemFrame() {
     system_frames += 1;
 
     previous_frame_length = frame_end - previous_frame_end;
-    if (frame_time_history_enabled) {
+    if (frame_time_readers != 0) {
         frame_time_history.Push(
             frame_end, std::chrono::duration<float, std::milli>(previous_frame_length).count());
     }
@@ -139,12 +139,14 @@ double PerfStats::GetLastFrameTimeScale() const {
     return duration_cast<DoubleSecs>(previous_frame_length).count() / FRAME_LENGTH;
 }
 
-void PerfStats::SetFrameTimeHistoryEnabled(bool enabled) {
+void PerfStats::SetFrameTimeHistoryEnabled(bool enabled, FrameTimeReader reader) {
     std::scoped_lock lock{object_mutex};
-    if (enabled && !frame_time_history_enabled) {
+    if (enabled && frame_time_readers == 0) {
         frame_time_history.Clear();
     }
-    frame_time_history_enabled = enabled;
+    const u8 bit = static_cast<u8>(reader);
+    frame_time_readers =
+        static_cast<u8>(enabled ? frame_time_readers | bit : frame_time_readers & ~bit);
 }
 
 std::vector<FrameTimeHistory::Entry> PerfStats::GetRecentFrameTimes(Clock::duration window) const {

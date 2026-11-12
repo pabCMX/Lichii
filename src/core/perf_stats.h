@@ -86,8 +86,13 @@ public:
      */
     double GetLastFrameTimeScale() const;
 
-    /// Starts or stops recording each present's interval. Starting clears the old entries.
-    void SetFrameTimeHistoryEnabled(bool enabled);
+    /// Who reads the frame time history: it records while any of them wants it.
+    enum class FrameTimeReader : u8 { PerformanceOverlay = 1, TrainerBars = 2 };
+
+    /// Starts or stops recording each present's interval for one reader. The first reader to start
+    /// clears the old entries; a reader that stops leaves them to the others.
+    void SetFrameTimeHistoryEnabled(bool enabled,
+                                    FrameTimeReader reader = FrameTimeReader::PerformanceOverlay);
 
     /// Present intervals that ended within `window` of the newest one, oldest first.
     std::vector<FrameTimeHistory::Entry> GetRecentFrameTimes(Clock::duration window) const;
@@ -104,7 +109,7 @@ private:
     std::array<double, 216000> perf_history{};
 
     FrameTimeHistory frame_time_history;
-    bool frame_time_history_enabled{};
+    u8 frame_time_readers{}; ///< FrameTimeReader bits
 
     /// Point when the cumulative counters were reset
     Clock::time_point reset_point = Clock::now();
