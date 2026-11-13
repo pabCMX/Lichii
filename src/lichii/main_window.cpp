@@ -217,6 +217,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "qt_common/gamemode.h"
 
 #ifdef _WIN32
+#include "common/windows/crash_handler.h"
 #include "common/windows/timer_resolution.h"
 #include "core/core_timing.h"
 
@@ -345,6 +346,13 @@ constexpr int EmuThreadStopTimeoutMs = 10'000;
 // A teardown that keeps making progress (Common::ShutdownProgress) is waited for this long at
 // most before Lichii gives up on it and exits.
 constexpr qint64 MaxEmuThreadShutdownMs = 180'000;
+// After this long, a forced exit ends the process even if its save has not finished. On Windows
+// it includes the dump of the stuck thread, whose helper gets 15 s plus the time to start.
+#ifdef _WIN32
+constexpr std::chrono::seconds ForcedExitTimeLimit{25};
+#else
+constexpr std::chrono::seconds ForcedExitTimeLimit{5};
+#endif
 
 constexpr size_t CopyBufferSize = 1_MiB;
 
@@ -2585,15 +2593,22 @@ void MainWindow::ExitIfEmulationThreadStuck() {
     if (!QtCommon::emu_thread || !QtCommon::emu_thread->isRunning()) {
         return;
     }
-    // The stuck thread can hold a lock that the save needs. The save gets this long.
+    // The stuck thread can hold a lock that the dump or the save needs.
     std::thread([] {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        std::this_thread::sleep_for(ForcedExitTimeLimit);
         EndProcessNow(1);
     }).detach();
     LOG_ERROR(Frontend,
               "Emulation thread failed to stop after {} ms (shutdown progress {}); saving "
               "settings and exiting",
               emu_force_stop_clock.elapsed(), Common::ShutdownProgress());
+#ifdef _WIN32
+    // The dump shows where the emulation thread waits. It suspends the other threads. If it does
+    // not end, they can stay suspended with locks held, so the process then ends at once.
+    if (!Common::Windows::WriteDumpNow("stalled_stop")) {
+        EndProcessNow(1);
+    }
+#endif
     play_time_manager->Stop();
     UpdateUISettings();
     game_list->SaveInterfaceLayout();

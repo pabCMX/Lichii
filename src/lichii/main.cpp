@@ -33,6 +33,7 @@
 
 #ifdef _WIN32
 #include <QScreen>
+#include "common/windows/crash_handler.h"
 
 static void OverrideWindowsFont() {
     // Qt5 chooses these fonts on Windows and they have fairly ugly alphanumeric/cyrillic characters
@@ -85,6 +86,12 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // Before anything else: the dump helper must not start the log, the config or Qt.
+    if (const auto helper_exit_code = Common::Windows::RunDumpHelper()) {
+        return *helper_exit_code;
+    }
+#endif
     LoadNx2Switches(argv[0]);
 #if LICHII_ROOM
     bool launch_room = false;
