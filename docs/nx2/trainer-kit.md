@@ -2,8 +2,8 @@
 
 The trainer kit adds debug-server methods that a practice panel (like a speedrun trainer) needs:
 pause and step the game, slow it down (to half speed) or speed it up, and flip diagnostic switches
-while it runs. It is on `explore/trainer-kit` (a Base plus these commits). It joins the harness kit only
-after a test-PC A/B of the Base against Base + kit shows no speed change.
+while it runs. It is in the Base since 2026-11-12 (base.md). Test-PC A/Bs of the Base against
+Base + trainer showed no speed change.
 
 The kit sits on the `input_record` work (explore/h48-present-record); debug-mcp.md describes
 that and the rest of the server. This file stays apart so the kit can be taken or left as one
