@@ -346,9 +346,13 @@ Switch 2 advances it on vi2 present calls. Generated display frames do not count
 `RunInput` starts the script at `g_nx2_present_count + 1`,
 the next present. The injector looks up the active step from the present count at every read
 (`InputAt`). The game reads the newest npad entry, which the 1 ms npad timer writes
-(`src/hid_core/resource_manager.cpp:48`), so the game could read the previous step for one more
-frame. While a call runs, `Core::g_nx2_present_hook` does one npad update right after each count
-(`SyncNpad`), so the newest entry has the new step before the game reads it. A slow frame
+(`src/hid_core/resource_manager.cpp:48`), so without help the game can read the previous step for
+one more frame. While a call runs, `Core::g_nx2_present_hook` writes one npad entry right after
+each count (`SyncNpad`, `ResourceManager::PublishNpad`, without the turbo and motion step). On
+Switch 2 the presenting thread waits in the vi2 call meanwhile, so its next read gets the new
+step. Switch 1 counts on the compositor thread, so a game read can still fall in the short gap
+between the count and that entry. The call returns once the present after its last step has its
+release entry too. A slow frame
 stretches the step in time but not in frames, so the same sequence moves the camera the same way
 on every run.
 

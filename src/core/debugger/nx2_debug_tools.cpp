@@ -13,7 +13,6 @@
 #include <fstream>
 #include <future>
 #include <iterator>
-#include <memory>
 #include <mutex>
 #include <numeric>
 #include <thread>
@@ -672,11 +671,14 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     return result;
 }
 
-/// The HID resource manager that SyncNpad updates while frame-step input runs. The mutex keeps it
-/// alive while the hook runs, and RunInput clears it under the same mutex.
+/// The HID resource manager that SyncNpad updates while frame-step input runs. RunInput holds the
+/// hid service for the call and clears manager under the mutex, so a running hook ends first.
+/// synced is the last present SyncNpad finished, so RunInput can wait for the release update of
+/// its last present.
 struct NpadSync {
     std::mutex mutex;
-    std::weak_ptr<::Service::HID::ResourceManager> manager;
+    ::Service::HID::ResourceManager* manager{};
+    std::atomic<u64> synced{};
 };
 
 NpadSync& GetNpadSync() {
@@ -687,12 +689,13 @@ NpadSync& GetNpadSync() {
 /// g_nx2_present_hook while frame-step input runs: one npad update right after each present's
 /// count. The game reads the newest npad entry, and the 1 ms npad timer writes it, so without
 /// this update the game can read the previous step for one more frame.
-void SyncNpad() {
+void SyncNpad(u64 present) {
     NpadSync& sync = GetNpadSync();
     std::scoped_lock lock{sync.mutex};
-    if (const auto manager = sync.manager.lock()) {
-        manager->UpdateNpad({});
+    if (sync.manager) {
+        sync.manager->PublishNpad();
     }
+    sync.synced.store(present, std::memory_order_release);
 }
 
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
@@ -719,6 +722,22 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
     }
     const int timeout = Param<int>(params, "timeout_s", static_cast<int>(total / 20 + 10), 1, 900);
+    // The hook goes in before the first present is picked, so every present of the call gets
+    // its npad update, and comes out after the injector.
+    NpadSync& sync = GetNpadSync();
+    const auto hid_server =
+        state.system.ServiceManager().GetService<::Service::HID::IHidServer>("hid");
+    {
+        std::scoped_lock lock{sync.mutex};
+        sync.manager = hid_server ? hid_server->GetResourceManager().get() : nullptr;
+        sync.synced.store(0, std::memory_order_relaxed);
+    }
+    g_nx2_present_hook.store(SyncNpad, std::memory_order_release);
+    SCOPE_EXIT {
+        g_nx2_present_hook.store(nullptr, std::memory_order_release);
+        std::scoped_lock lock{sync.mutex};
+        sync.manager = nullptr;
+    };
     const u64 start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
     const auto script = std::make_shared<const std::vector<InputStep>>(steps);
     controller->SetInputInjector([script, start] {
@@ -727,24 +746,13 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     SCOPE_EXIT {
         controller->SetInputInjector({});
     };
-    if (const auto hid =
-            state.system.ServiceManager().GetService<::Service::HID::IHidServer>("hid")) {
-        NpadSync& sync = GetNpadSync();
-        std::scoped_lock lock{sync.mutex};
-        sync.manager = hid->GetResourceManager();
-    }
-    g_nx2_present_hook.store(SyncNpad, std::memory_order_release);
-    SCOPE_EXIT {
-        g_nx2_present_hook.store(nullptr, std::memory_order_release);
-        NpadSync& sync = GetNpadSync();
-        std::scoped_lock lock{sync.mutex};
-        sync.manager.reset();
-    };
     const auto begin = std::chrono::steady_clock::now();
     const auto deadline = begin + std::chrono::seconds{timeout};
     for (;;) {
         const u64 now = g_nx2_present_count.load(std::memory_order_relaxed);
-        if (now >= start + total) {
+        // Done once the present after the last step has its release update too.
+        if (now >= start + total &&
+            (!hid_server || sync.synced.load(std::memory_order_acquire) >= start + total)) {
             break;
         }
         if (state.stopping.load(std::memory_order_relaxed)) {
