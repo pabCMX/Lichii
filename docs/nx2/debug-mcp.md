@@ -352,9 +352,8 @@ each count (`SyncNpad`, `ResourceManager::PublishNpad`, without the turbo and mo
 Switch 2 the presenting thread waits in the vi2 call meanwhile, so its next read gets the new
 step. Switch 1 counts on the compositor thread, so a game read can still fall in the short gap
 between the count and that entry. The call returns once the present after its last step has its
-release entry too. A slow frame
-stretches the step in time but not in frames, so the same sequence moves the camera the same way
-on every run.
+release entry too. A slow frame stretches a step in time but not in frames: each step still covers
+the same number of presents.
 
 Release: the injector returns nothing from the end of the last step on, so the input ends on its
 exact frame even before the handler removes it. The handler removes it on every exit path
