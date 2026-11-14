@@ -296,7 +296,7 @@ it is destroyed:
 
 ## Trainer overlay
 
-Ctrl+F12 ("Toggle Trainer Overlay" in the hotkey settings) shows or hides an input display over
+Ctrl+F1 ("Toggle Trainer Overlay" in the hotkey settings) shows or hides an input display over
 the bottom-left of the game image. It is off at start and the state is not saved.
 
 - It shows every npad button the game reads (A B X Y, L R ZL ZR, Plus, Minus, the D-pad, the stick
