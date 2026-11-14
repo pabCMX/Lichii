@@ -120,6 +120,36 @@ TEST_CASE("Guest presents advance debug input across the timestamp ring boundary
     REQUIRE(ring[1].load() >= ring[0].load());
 }
 
+TEST_CASE("Guest presents call the present hook after their count", "[core][nx2_debug_server]") {
+    // The hook stands in for the npad sync: an npad update in it must see the new present's step.
+    static const std::vector<Core::Nx2Debug::InputStep> steps{
+        Core::Nx2Debug::ParseInputStep(json{{"buttons", {"A"}}, {"frames", 1}}),
+        Core::Nx2Debug::ParseInputStep(json{{"buttons", {"B"}}, {"frames", 1}})};
+    static std::atomic<int> calls{};
+    static std::atomic<Core::HID::NpadButton> seen{};
+    auto& count = Core::g_nx2_present_count;
+    auto& ring = Core::g_nx2_present_times_ns;
+    const u64 previous_count = count.load();
+    const u64 previous_time = ring[11].load();
+    SCOPE_EXIT {
+        Core::g_nx2_present_hook.store(nullptr);
+        count.store(previous_count);
+        ring[11].store(previous_time);
+    };
+    count.store(10);
+    Core::g_nx2_present_hook.store(+[] {
+        ++calls;
+        const auto input = Core::Nx2Debug::InputAt(steps, 10, Core::g_nx2_present_count.load());
+        seen.store(input ? input->buttons : Core::HID::NpadButton::None);
+    });
+    Core::RecordGuestPresent();
+    REQUIRE(calls.load() == 1);
+    REQUIRE(seen.load() == Core::HID::NpadButton::B);
+    Core::g_nx2_present_hook.store(nullptr);
+    Core::RecordGuestPresent();
+    REQUIRE(calls.load() == 1);
+}
+
 TEST_CASE("Debug frame times measure intervals and retain the ring tail", "[core][nx2_debug_server]") {
     auto& ring = Core::g_nx2_present_times_ns;
     SCOPE_EXIT {

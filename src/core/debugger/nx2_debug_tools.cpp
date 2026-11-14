@@ -13,6 +13,8 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <memory>
+#include <mutex>
 #include <numeric>
 #include <thread>
 
@@ -30,8 +32,11 @@
 #include "core/debugger/nx2_debug_tools.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/service/hid/hid_server.h"
+#include "core/hle/service/sm/sm.h"
 #include "core/memory.h"
 #include "hid_core/hid_core.h"
+#include "hid_core/resource_manager.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_trace/recorder.h"
 #include "video_core/nx2_debug_control.h"
@@ -667,6 +672,29 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     return result;
 }
 
+/// The HID resource manager that SyncNpad updates while frame-step input runs. The mutex keeps it
+/// alive while the hook runs, and RunInput clears it under the same mutex.
+struct NpadSync {
+    std::mutex mutex;
+    std::weak_ptr<::Service::HID::ResourceManager> manager;
+};
+
+NpadSync& GetNpadSync() {
+    static NpadSync sync;
+    return sync;
+}
+
+/// g_nx2_present_hook while frame-step input runs: one npad update right after each present's
+/// count. The game reads the newest npad entry, and the 1 ms npad timer writes it, so without
+/// this update the game can read the previous step for one more frame.
+void SyncNpad() {
+    NpadSync& sync = GetNpadSync();
+    std::scoped_lock lock{sync.mutex};
+    if (const auto manager = sync.manager.lock()) {
+        manager->UpdateNpad({});
+    }
+}
+
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
 /// the next present on, and returns once they are done. The injector stops by itself after the
 /// last step; leaving this function by any path removes it.
@@ -698,6 +726,19 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     });
     SCOPE_EXIT {
         controller->SetInputInjector({});
+    };
+    if (const auto hid =
+            state.system.ServiceManager().GetService<::Service::HID::IHidServer>("hid")) {
+        NpadSync& sync = GetNpadSync();
+        std::scoped_lock lock{sync.mutex};
+        sync.manager = hid->GetResourceManager();
+    }
+    g_nx2_present_hook.store(SyncNpad, std::memory_order_release);
+    SCOPE_EXIT {
+        g_nx2_present_hook.store(nullptr, std::memory_order_release);
+        NpadSync& sync = GetNpadSync();
+        std::scoped_lock lock{sync.mutex};
+        sync.manager.reset();
     };
     const auto begin = std::chrono::steady_clock::now();
     const auto deadline = begin + std::chrono::seconds{timeout};
