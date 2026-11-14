@@ -695,7 +695,10 @@ void SyncNpad(u64 present) {
     if (sync.manager) {
         sync.manager->PublishNpad();
     }
-    sync.synced.store(present, std::memory_order_release);
+    // Presents from two vi2 sessions can finish out of order.
+    if (present > sync.synced.load(std::memory_order_relaxed)) {
+        sync.synced.store(present, std::memory_order_release);
+    }
 }
 
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
@@ -738,11 +741,17 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
         std::scoped_lock lock{sync.mutex};
         sync.manager = nullptr;
     };
-    const u64 start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
+    // Under the mutex, a present counted between picking start and installing the injector
+    // gets its npad update only once the injector is in.
     const auto script = std::make_shared<const std::vector<InputStep>>(steps);
-    controller->SetInputInjector([script, start] {
-        return InputAt(*script, start, g_nx2_present_count.load(std::memory_order_relaxed));
-    });
+    u64 start{};
+    {
+        std::scoped_lock lock{sync.mutex};
+        start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
+        controller->SetInputInjector([script, start] {
+            return InputAt(*script, start, g_nx2_present_count.load(std::memory_order_relaxed));
+        });
+    }
     SCOPE_EXIT {
         controller->SetInputInjector({});
     };
