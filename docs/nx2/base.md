@@ -7,10 +7,121 @@ new Base. An A/B is then always Base against Base plus one change. Names and flo
 
 ## This Base
 
-The Base cut from this prep is `base/Base-977dd8ab43-20261113-0635` (name to be confirmed at the
-06:35 step): origin/nx2 `977dd8ab43` (#1552) plus 85 commits of ours. They are the 84 commits of
-`base/Base-db7a53c1e2-20261112-0635` below its doc commit, in the same order, and this commit.
-The two Bases differ by 55 upstream commits (first parent) and by the rename below.
+The current Base is `base/Base-c1f8790839-20261114-0635`: origin/nx2 `c1f8790839` (#1733) plus
+98 commits of ours:
+
+- the 85 kit commits of `base/Base-87d84d513c-20261113-0635` (the harness kit, the trainer and
+  the doc commit of the prep of 2026-11-13), in the same order,
+- `hotkeys: Toggle Trainer Overlay on Ctrl+F1` (new, see "Hotkeys"),
+- this commit,
+- the 11 trainer bars commits of the same Base, in the same order.
+
+The old Base's last commit (its base.md) is replaced by this commit. No kit commit is dropped:
+upstream's new debug-server methods (`capture_bundle`, `trace_record`, `trace_stop`,
+`trace_status`) do not do what a kit method does.
+
+Kit commits that changed in the move (the others have the same added and removed lines as
+before):
+
+- `debugger: timed ("ms") and measured ("measure") debug-server input`: upstream gave
+  `ReadFrameTimes` a `recent_limit` and a `longest_ms` key. The kit's `IntervalStats` (shared by
+  `frame_times` and `measure`) takes both, so `measurement` also has `longest_ms` now.
+- `debugger: input_record records the game's input once per present`: upstream removed
+  `g_nx2_present_time_services` and writes the present times at each present (for bug bundles).
+  #1696 moved the count and the time store into `Core::RecordGuestPresent()`, which also counts
+  Switch 1 game composites. It returns the new count now, and the kit's present hook runs after
+  it in vi2 229 only, as before. The npad sync and the recorder read `g_nx2_present_count`.
+- `debugger: RecordInput and IsServiceRunning for the frontend`: `IsServiceRunning` read the
+  removed counter. It reads a kit counter `running_services` now, which the debug service
+  counts up and down (3 lines).
+- `debugger: screenshot reports the guest present it captured`: upstream moved the screenshot to
+  `CaptureScreenshot`, which returns a `Png` (also used by the bug bundle). `Png` has a
+  `present` field for it.
+- `trainer kit: fixed time control in each caller's unit; step_frames capture`: the "paused"
+  refusal is at the top of the `screenshot` method, before `CaptureScreenshot`.
+- `kit: input_sequence capture_frames saves screenshots at clip frames`: `CaptureScreenshot`
+  encodes with the kit's `ScreenshotPng`, as the kit's `Screenshot` did. The PNG is the same.
+- The hotkey array is 35, 36 and 37 long after `yuzu: Record Input (Per Present) hotkey`,
+  `trainer overlay: input display window` and `trainer overlay: frame-time bars panel`.
+  Upstream's "Report a Bug" and "Load/Remove Amiibo" made it 34, and git takes our size changes
+  as upstream's own, so each move must set them by hand.
+- `hotkeys: our entries at their row in the hotkey dialog`: our three rows are at their dialog
+  rows again (19, 28 and 35), after upstream's new rows.
+- Conflicts in lists only: `src/common/CMakeLists.txt`, `src/core/CMakeLists.txt` and
+  `src/tests/CMakeLists.txt` (both sides stay), the tool names in `tools/nx2/test_debug_mcp.py`
+  (upstream's `capture_bundle` and trace tools added).
+- Bars commit `trainer overlay: review round 1 fixes`: `OnEmulationStopped` stops upstream's
+  bug report capture and undoes the session speed changes (#1687), then resets the bars.
+
+## Hotkeys
+
+Upstream's "Report a Bug" (#1647) and our "Toggle Trainer Overlay" had the same default,
+Ctrl+F12. The owner decided on 2026-11-13: Report a Bug keeps Ctrl+F12, the trainer overlay
+moves to Ctrl+F1. No other default key or controller hotkey is used twice on this Base. Upstream's
+other new hotkey is "Load/Remove Amiibo" on F2 (#1716). A profile that saved the old Ctrl+F12 as
+a custom key for the overlay keeps it.
+
+## Upstream since b55de0c1b2
+
+55 commits (first parent). These change what a test run sees:
+
+- #1728: the stuck-stop exit, the atomic config and play-time saves and the CRT fast-fail dumps
+  of the fork PRs 1 and 2 are now upstream. A stop that stalls ends Lichii after it saves the
+  settings, with no thread terminate.
+- #1733: HostTiming sleeps until a margin before the next one-shot event and spins the rest
+  (Windows timer lateness). This changes guest timing and pacing: time this Base against the
+  old one, and read the TAS results of the old Base apart.
+- #1685: no end-of-load driver cache save where reads race builds. Check the H58-S2 warm start
+  again on this Base (main PC).
+- #1736 (command list pages copied again after DMA copies and clears), #1731 (texture
+  collector), #1700 (host1x syncpoint actions outside the guard), #1081 (fast-draw verification
+  gate), #1677 (Intel barriers), #1732 (mesh fallback on RADV RDNA2): GPU path changes with no
+  setting.
+- #1687: "Limit Speed Percent" stays as the user set it after a game closes.
+- #1696: Switch 1 games count frames for frame-timed input (`g_nx2_present_count`).
+- Diagnostics, off unless set: `EDEN_NX2_TC_TRACE` (#1130), `EDEN_NX2_VULKAN_CACHE_FLUSH`
+  (#963), sampled GPU frames by source line (#1723), JIT block names in the Windows sampler
+  (#1724), trace replay checks (#1656).
+- #1704 (Mario Kart World 60 FPS mode), #1734 and #1737 (solid NSZ and NCZ), #1395 (status bar
+  chip colours), #1603 (commit in About), #1716 (Amiibo hotkey): no known effect on an Ocarina
+  test run.
+
+The lowering stamp is the same as on b55de0c1b2, so it differs from the Base of 2026-11-13
+(next section).
+
+## Upstream from 87d84d513c to b55de0c1b2
+
+67 commits (first parent). These change what a test run sees:
+
+- The shader lowering sources changed (#1181, #1008), so the lowering stamp changed. The first
+  boot of each profile on this Base lowers its cached programs again, as at the owner start of
+  2026-11-13 (20.7 min to the first present). Warn the owner before he starts this Base.
+- #1639: a fixed frame-fence wait in vi2 suspends the guest service thread on a kernel event,
+  so its core can run other work. #1641: draw state is reused on the sole GPU thread. #1651
+  reverts #1486 (list-fed grid macro calls): it caused white flashing in Ocarina. #1534, #995,
+  #1105, #1155, #1218, #1568, #1619, #1621: buffer, pipeline build and lock changes with no
+  setting. Time this Base against the old one before an A/B across the two.
+- Ocarina: #1659 (camera from the guest buffer binding), #1672 (NaN and Inf removed from the
+  DLSS colour input), #1137 (1.0 output passes in No Sharpening), #863 (points and lines through
+  the mesh fallback: the foliage shadows; it acts on the AMD runs of the main PC).
+  #1679, #1663, #1660 and #1180 act only with FPS Unlock.
+- #1406 and #1407: the pipeline binary store stays on for AMD's own driver, and a session keeps
+  what it used. #1653: RADV keeps its own pipeline cache.
+- #1417: a close during the boot shader load no longer hangs, and the next boot in the same
+  window works.
+- #1647: the one-press bug bundle (Help > Report a Bug, `capture_bundle`;
+  `docs/nx2/bug-bundle.md`). The present times are now written at every present, also with no
+  debug server.
+- #1648 and #1655: GPU trace record and headless replay (`trace_record`, `EDEN_NX2_GPU_TRACE`,
+  `eden-cli --replay`; `docs/nx2/gpu-trace.md`). Off unless asked for.
+- #1626: the default log names what still builds on the GPU thread mid-game.
+- #1298 and #1676 (audio sysmix), #1396 (motion), #1401 (game list artwork per program id),
+  #1301 (NVIDIA disk cache on Linux), #1558 and #1615 (Windows loading screen): no known effect
+  on an Ocarina test run.
+
+The upstream changes from `977dd8ab43` to `87d84d513c` and the rename are in the
+`docs/nx2/base.md` of `base/Base-87d84d513c-20261113-0635`. The rename facts that a script needs
+are in the next section.
 
 ## Upstream's rename (#1541, #1544, #1551, #1552, #1553)
 
@@ -38,31 +149,9 @@ What it did to the kit, commit by commit:
 - The added and removed lines of each commit are the same as before, except for the renamed
   paths and includes, and one line of the doc commit of the first Base of 2026-11-11, which
   now names no other emulator (the codemod made it name Lichii).
-- `rename.py check` lists 3 pending names in kit code: the page size and page mask constants
-  of `Core::Memory` in `nx2_debug_tools.cpp`. Upstream has not renamed these library names yet
-  (an upstream branch for the library names is not merged). The rest of the pending list is
-  upstream's.
-
-## Upstream since db7a53c1e2
-
-55 commits (first parent). These change what a test run sees:
-
-- #1459: a deleted buffer is cleared from the bindings of every channel. The lab's H56 (white
-  blinks in the Sacred Forest Meadow grass) names it.
-- #1485: Ocarina light-table shadow maps through descriptor arrays (the dark water grid).
-- #1508: NVIDIA DLSS Frame Generation for Ocarina as a frame generation type. #1493: frame
-  generation runs with HDR.
-- #1441, #1460, #1479, #1515, #1516, #1518, #1519, #1520, #1521, #1539: buffer, query, fast draw
-  and shader path changes with no setting. Time this Base against the old one before an A/B
-  across the two.
-- #1450: guest threads are suspended before power-off (no Userspace PANIC at a stop). #1453:
-  Windows writes a minidump and logs a `Host crash` line on an unhandled exception or abort().
-- #1478: a dialog before a Switch 2 boot on a PC with under 16 GB of RAM
-  (`show_low_ram_warning`, `[UI]`).
-- #1536: recommended settings reset and restore per-game overrides. #1505: no cached pipeline
-  build at boot after a boot load that did not finish.
-- #1462: merge of upstream Eglantine nx2 `6be10b5c12`.
-- New traces, off unless set: `EDEN_NX2_BUFFER_TRACE=1` (#1530).
+- On the night prep, `rename.py check` listed 3 pending names in kit code, the page size and
+  page mask constants of `Core::Memory`. #1550 renamed them, and the move renamed the kit's
+  3 lines in the same commit. `rename.py check --strict` passes on this Base.
 
 ## What the kit adds
 
@@ -97,7 +186,7 @@ The trainer, in the Base since 2026-11-12 ([trainer-kit.md](trainer-kit.md) and 
 
 - Run control: `pause`, `resume`, `step_frames`, `time_control` (half speed and up, Ocarina only,
   with `EDEN_NX2_OOT_TIME_CONTROL=1` at boot) and `switches` (live diagnostic switches).
-- Input display overlay, hotkey Ctrl+F12, bottom-left. It does not overlap upstream's frame
+- Input display overlay, hotkey Ctrl+F1, bottom-left. It does not overlap upstream's frame
   stats overlay (Ctrl+V, top-left).
 - Recorder pre-roll (`pre_roll`, `record_anchor`): input before Ctrl+F8 is kept.
 - `capture_frames`: screenshots at clip frames. Since kit 3 the shot is the target present.
@@ -193,7 +282,8 @@ handheld 1x uses its own upscaler, also on an NVIDIA card (`SelectOcarinaUpscale
 settings act only while DLSS runs:
 
 - `nvidia_dlss_quality`, default Automatic (0). Automatic picks a mode that fits the render and
-  output sizes. Native (1) is DLAA at the render size.
+  output sizes. Native (1) is DLAA at the render size. Since #1589, in Ocarina, Balanced,
+  Performance and Ultra Performance also lower the game's render scale.
 - `nvidia_dlss_preset`, default M (0). Before #1249 the model was K, and `EDEN_NX2_DLSS_PRESET`
   picked another one. That variable is no longer read.
 
@@ -228,7 +318,7 @@ Linux check, from a checkout that has `tools/nx2/devbox` (for example `~/dev/lic
 
 ```sh
 flock ~/dev/lichii-builds/.build.lock env JOBS=4 \
-  tools/nx2/devbox/linux-build.sh base-prep/20261113 base-prep-20261113
+  tools/nx2/devbox/linux-build.sh base/Base-c1f8790839-20261114-0635 base-c1f8790839
 ```
 
 Windows packages use the main-PC recipe in `docs/nx2/devbox-build.md` on `personal/oot-lab`, with
